@@ -1,4 +1,4 @@
-# 🧠 Neural‑Hub
+# 🧠 NeuralHub
 
 **Central server for NeuralProtocol agents**  
 Acts as the brain's thalamus – all signals pass through, but it doesn't decide.

@@ -9,9 +9,9 @@ Acts as the brain's thalamus – all signals pass through, but it doesn't decide
 
 ---
 
-## What is Neural‑Hub?
+## What is NeuralHub?
 
-Neural‑Hub is the central nervous system for agent networks built with [NeuralProtocol](https://github.com/firecode16/neural-protocol).  
+NeuralHub is the central nervous system for agent networks built with [NeuralProtocol](https://github.com/firecode16/neural-protocol).  
 It provides:
 
 - **Registry** – keeps track of all connected agents (by logical name and unique hash).

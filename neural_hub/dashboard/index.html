@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NeuralHub · Monitor</title>
+    <style>
+        /* ----- Variables (neutral palette) ----- */
+        :root {
+            --bg: #f8fafc;
+            --surface: #ffffff;
+            --border: #e2e8f0;
+            --border-strong: #cbd5e1;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --text-muted: #94a3b8;
+            --accent: #3b82f6;
+            --accent-soft: #dbeafe;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+
+            --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+            --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+            --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: var(--bg);
+            color: var(--text-primary);
+            font-family: var(--font-sans);
+            font-size: 14px;
+            line-height: 1.5;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* ----- Barra superior ----- */
+        .topbar {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 0 24px;
+            height: 56px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .logo-area {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo {
+            font-weight: 600;
+            font-size: 18px;
+            color: var(--text-primary);
+            letter-spacing: -0.01em;
+        }
+
+        .version {
+            font-size: 12px;
+            color: var(--text-muted);
+            background: var(--bg);
+            padding: 2px 8px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
+        }
+
+        .hub-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--border-strong);
+        }
+        .dot.online { background: var(--success); }
+        .dot.offline { background: var(--danger); }
+        .dot.demo { background: var(--warning); }
+
+        .uptime, .signal-rate {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        .separator {
+            width: 1px;
+            height: 24px;
+            background: var(--border);
+            margin: 0 12px;
+        }
+
+        /* ----- Layout principal (grid) ----- */
+        .main {
+            display: grid;
+            grid-template-columns: 300px 1fr 320px;
+            gap: 1px;
+            background: var(--border);
+            flex: 1;
+            min-height: 0;  /* important for scrolling */
+        }
+
+        .panel {
+            background: var(--surface);
+            display: flex;
+            flex-direction: column;
+            min-height: 0;  /* allow scrolling inside */
+        }
+
+        .panel-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 500;
+            font-size: 13px;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+
+        .panel-badge {
+            background: var(--bg);
+            padding: 2px 8px;
+            border-radius: 20px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+        }
+
+        .panel-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px;
+        }
+
+        /* ----- Lista de agentes (tabla) ----- */
+        .agents-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        .agents-table th {
+            text-align: left;
+            font-weight: 500;
+            color: var(--text-secondary);
+            padding: 6px 4px;
+            border-bottom: 1px solid var(--border);
+        }
+        .agents-table td {
+            padding: 8px 4px;
+            border-bottom: 1px solid var(--border-soft);
+        }
+        .agent-name {
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+        .agent-hash {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .agent-stats {
+            display: flex;
+            gap: 8px;
+        }
+        .stat {
+            background: var(--bg);
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .synapse-mini {
+            width: 60px;
+            height: 4px;
+            background: var(--border);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .synapse-mini-fill {
+            height: 100%;
+            background: var(--accent);
+            border-radius: 2px;
+        }
+
+        /* ----- Canvas (gráfico) ----- */
+        .graph-area {
+            flex: 1;
+            position: relative;
+            background: var(--surface);
+        }
+        #neural-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        /* ----- Stream de señales ----- */
+        .signal-stream {
+            height: 160px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+        }
+        .stream-inner {
+            flex: 1;
+            overflow-y: auto;
+            font-size: 12px;
+            padding: 6px 12px;
+        }
+        .signal-row {
+            display: flex;
+            gap: 12px;
+            padding: 4px 0;
+            border-bottom: 1px solid var(--border);
+            color: var(--text-secondary);
+        }
+        .signal-ts { color: var(--text-muted); min-width: 70px; }
+        .signal-type { font-weight: 500; min-width: 110px; }
+        .signal-route { flex: 1; }
+        .signal-size { min-width: 50px; text-align: right; }
+
+        /* colores para tipos (sutiles) */
+        .type-ACTION_POTENTIAL { color: #2563eb; }
+        .type-DOPAMINE         { color: #059669; }
+        .type-NOREPINEPHRINE   { color: #b45309; }
+        .type-GLUTAMATE        { color: #7c3aed; }
+        .type-GABA             { color: #dc2626; }
+        .type-SEROTONIN        { color: #0891b2; }
+
+        /* ----- Métricas (cards) ----- */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            padding: 12px;
+        }
+        .metric-card {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+        }
+        .metric-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
+        .metric-value {
+            font-size: 24px;
+            font-weight: 600;
+            color: var(--text-primary);
+            line-height: 1.2;
+        }
+        .metric-sub {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        /* ----- Distribución de señales ----- */
+        .dist-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            font-size: 13px;
+        }
+        .dist-label {
+            min-width: 90px;
+            color: var(--text-secondary);
+        }
+        .dist-track {
+            flex: 1;
+            height: 6px;
+            background: var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .dist-fill {
+            height: 100%;
+            border-radius: 4px;
+        }
+        .dist-count {
+            min-width: 40px;
+            text-align: right;
+            color: var(--text-secondary);
+        }
+
+        /* ----- Tabla de sinapsis ----- */
+        .syn-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        .syn-table th {
+            text-align: left;
+            font-weight: 500;
+            color: var(--text-secondary);
+            padding: 8px 4px;
+            border-bottom: 1px solid var(--border);
+        }
+        .syn-table td {
+            padding: 6px 4px;
+            border-bottom: 1px solid var(--border);
+        }
+        .strength-bar {
+            width: 60px;
+            height: 6px;
+            background: var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .strength-fill {
+            height: 100%;
+            background: var(--accent);
+            border-radius: 4px;
+        }
+
+        /* ----- Conexión bar (inferior izquierda) ----- */
+        .conn-bar {
+            padding: 10px 16px;
+            background: var(--bg);
+            border-top: 1px solid var(--border);
+            font-size: 12px;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+        .conn-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--border-strong);
+        }
+        .conn-indicator.connected { background: var(--success); }
+        .conn-indicator.demo { background: var(--warning); }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg); }
+        ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+    </style>
+</head>
+<body>
+
+<div class="topbar">
+    <div class="logo-area">
+        <span class="logo">🧠 NeuralHub</span>
+        <span class="version">v1.0</span>
+    </div>
+    <div class="hub-status">
+        <div class="status-indicator">
+            <span class="dot" id="hub-dot"></span>
+            <span id="hub-status-text">Iniciando</span>
+        </div>
+        <div class="separator"></div>
+        <div class="uptime" id="uptime-display">Uptime 00:00:00</div>
+        <div class="separator"></div>
+        <div class="signal-rate" id="signal-rate">0 sig/s</div>
+    </div>
+    <div id="clock" style="color:var(--text-secondary); font-size:13px;">--:--:--</div>
+</div>
+
+<div class="main">
+    <!-- Panel izquierdo: Agentes -->
+    <div class="panel">
+        <div class="panel-header">
+            Agentes conectados
+            <span class="panel-badge" id="agent-count">0</span>
+        </div>
+        <div class="panel-body">
+            <table class="agents-table" id="agents-table">
+                <thead>
+                    <tr><th>Agente</th><th>Hash</th><th>TX/RX</th><th>Sinapsis</th></tr>
+                </thead>
+                <tbody id="agents-tbody">
+                    <tr><td colspan="4" style="text-align:center; color:var(--text-muted); padding:20px;">Esperando agentes...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="conn-bar">
+            <span class="conn-indicator" id="conn-indicator"></span>
+            <span id="conn-text">Modo demo</span>
+        </div>
+    </div>
+
+    <!-- Panel central: Grafo + Stream -->
+    <div class="panel">
+        <div class="panel-header">
+            Red de sinapsis
+            <span class="panel-badge" id="synapse-count">0</span>
+        </div>
+        <div class="graph-area">
+            <canvas id="neural-canvas"></canvas>
+        </div>
+        <div class="signal-stream">
+            <div class="panel-header">
+                Últimas señales
+                <span class="panel-badge" id="total-signals">0</span>
+            </div>
+            <div class="stream-inner" id="signal-stream"></div>
+        </div>
+    </div>
+
+    <!-- Panel derecho: Métricas y sinapsis -->
+    <div class="panel">
+        <div class="panel-header">Métricas</div>
+        <div class="metrics-grid">
+            <div class="metric-card"><div class="metric-label">Señales</div><div class="metric-value" id="m-signals">0</div><div class="metric-sub">transmitidas</div></div>
+            <div class="metric-card"><div class="metric-label">Bytes</div><div class="metric-value" id="m-bytes">0</div><div class="metric-sub">en red</div></div>
+            <div class="metric-card"><div class="metric-label">Agentes</div><div class="metric-value" id="m-agents">0</div><div class="metric-sub">online</div></div>
+            <div class="metric-card"><div class="metric-label">Encoladas</div><div class="metric-value" id="m-queued">0</div><div class="metric-sub">pendientes</div></div>
+        </div>
+
+        <div class="panel-header">Distribución</div>
+        <div>
+            <div class="dist-row"><span class="dist-label">ACTION</span><div class="dist-track"><div class="dist-fill" id="dist-action" style="background:#2563eb;width:0%"></div></div><span class="dist-count" id="cnt-action">0</span></div>
+            <div class="dist-row"><span class="dist-label">DOPAMINE</span><div class="dist-track"><div class="dist-fill" id="dist-dopamine" style="background:#059669;width:0%"></div></div><span class="dist-count" id="cnt-dopamine">0</span></div>
+            <div class="dist-row"><span class="dist-label">NOREPI</span><div class="dist-track"><div class="dist-fill" id="dist-norepi" style="background:#b45309;width:0%"></div></div><span class="dist-count" id="cnt-norepi">0</span></div>
+            <div class="dist-row"><span class="dist-label">GLUTAMATE</span><div class="dist-track"><div class="dist-fill" id="dist-glutamate" style="background:#7c3aed;width:0%"></div></div><span class="dist-count" id="cnt-glutamate">0</span></div>
+            <div class="dist-row"><span class="dist-label">GABA</span><div class="dist-track"><div class="dist-fill" id="dist-gaba" style="background:#dc2626;width:0%"></div></div><span class="dist-count" id="cnt-gaba">0</span></div>
+            <div class="dist-row"><span class="dist-label">SEROTONIN</span><div class="dist-track"><div class="dist-fill" id="dist-serotonin" style="background:#0891b2;width:0%"></div></div><span class="dist-count" id="cnt-serotonin">0</span></div>
+        </div>
+
+        <div class="panel-header">Plasticidad (sinapsis)</div>
+        <div class="panel-body" style="padding:0;">
+            <table class="syn-table">
+                <thead><tr><th>Conexión</th><th>Strength</th><th>% éxito</th><th>TX</th></tr></thead>
+                <tbody id="synapse-table-body">
+                    <tr><td colspan="4" style="text-align:center; color:var(--text-muted); padding:16px;">Sin sinapsis</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+// NEURAL HUB DASHBOARD — Polling HTTP
+// ═══════════════════════════════════════════════════════════
+
+const $ = id => document.getElementById(id);
+
+const STATE = {
+    agents: {},
+    synapses: {},
+    signalLog: [],
+    signalCounts: { ACTION_POTENTIAL:0, DOPAMINE:0, NOREPINEPHRINE:0, GLUTAMATE:0, GABA:0, SEROTONIN:0 },
+    totalSignals: 0,
+    totalBytes: 0,
+    queued: 0,
+    startTime: Date.now(),
+    signalsThisSec: 0,
+    mode: 'live', // 'live' o 'demo'
+};
+
+const SIG_COLORS = {
+    ACTION_POTENTIAL: '#2563eb', DOPAMINE: '#059669', NOREPINEPHRINE: '#b45309',
+    GLUTAMATE: '#7c3aed', GABA: '#dc2626', SEROTONIN: '#0891b2'
+};
+
+// Reloj y uptime
+setInterval(() => {
+    $('clock').textContent = new Date().toLocaleTimeString('es', {hour12: false});
+    const up = Math.floor((Date.now() - STATE.startTime) / 1000);
+    const h = String(Math.floor(up/3600)).padStart(2,'0');
+    const m = String(Math.floor((up%3600)/60)).padStart(2,'0');
+    const s = String(up%60).padStart(2,'0');
+    $('uptime-display').textContent = `Uptime ${h}:${m}:${s}`;
+    $('signal-rate').textContent = `${STATE.signalsThisSec} sig/s`;
+    STATE.signalsThisSec = 0;
+}, 1000);
+
+// ── Polling HTTP a /api/status ─────────────────────────────
+async function pollStatus() {
+    try {
+        console.log('Polling...');
+        const res = await fetch('/api/status');
+        console.log('Respuesta status:', res.status);
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        console.log('Datos:', data);
+
+        // Transformar agents a clave neural_hash
+        const agents = {};
+        if (data.agents) {
+            Object.values(data.agents).forEach(info => {
+                agents[info.neural_hash] = info;
+            });
+        }
+        STATE.agents = agents;
+        STATE.synapses = data.synapses || {};
+        STATE.stats = data.stats || STATE.stats;
+        STATE.totalSignals = data.stats?.total_signals || 0;
+        STATE.totalBytes = data.stats?.total_bytes || 0;
+        STATE.queued = data.stats?.queued_signals || 0;
+
+        // Actualizar indicador de conexión
+        $('conn-indicator').className = 'conn-indicator connected';
+        $('conn-text').textContent = 'Conectado al hub';
+        updateHubStatus('online');
+        STATE.mode = 'live';
+
+        renderAll();
+    } catch (err) {
+        console.warn('Error en polling:', err);
+        $('conn-indicator').className = 'conn-indicator demo';
+        $('conn-text').textContent = 'Sin conexión al hub - modo demo';
+        if (STATE.mode !== 'demo') {
+            activateDemo();
+        }
+    }
+}
+
+// ── Modo demo ───────────────────────────
+function activateDemo() {
+    STATE.mode = 'demo';
+    updateHubStatus('demo');
+    STATE.agents = {
+        'a7cd9dc4f211': { agent_id:'soporte', neural_hash:'a7cd9dc4f211', signals_sent:0, signals_received:0 },
+        'f14ef82f8a33': { agent_id:'ventas1', neural_hash:'f14ef82f8a33', signals_sent:0, signals_received:0 },
+        '28108417cc91': { agent_id:'ventas2', neural_hash:'28108417cc91', signals_sent:0, signals_received:0 },
+    };
+    STATE.synapses = {
+        'a7cd9dc4f211:f14ef82f8a33': { strength:1.2, success_rate:0.85, tx:34 },
+        'a7cd9dc4f211:28108417cc91': { strength:0.9, success_rate:0.72, tx:21 },
+    };
+    renderAll();
+    startDemoSimulation();
+}
+
+const DEMO_FLOWS = [
+    { from:'a7cd9dc4f211', to:'f14ef82f8a33', type:'NOREPINEPHRINE', size:264, label:'consulta' },
+    { from:'f14ef82f8a33', to:'28108417cc91', type:'GLUTAMATE', size:209, label:'venta' },
+    { from:'28108417cc91', to:'', type:'DOPAMINE', size:224, label:'pago' },
+];
+let demoInterval;
+function startDemoSimulation() {
+    if (demoInterval) clearInterval(demoInterval);
+    demoInterval = setInterval(() => {
+        const flow = DEMO_FLOWS[Math.floor(Math.random() * DEMO_FLOWS.length)];
+        injectSignal(flow);
+    }, 2000);
+}
+function injectSignal({from, to, type, size, label}) {
+    const ts = new Date().toLocaleTimeString('es', {hour12:false});
+    const fromAgent = STATE.agents[from];
+    const toAgent = to ? STATE.agents[to] : null;
+
+    STATE.totalSignals++;
+    STATE.totalBytes += size;
+    STATE.signalsThisSec++;
+    STATE.signalCounts[type] = (STATE.signalCounts[type]||0)+1;
+    if (fromAgent) fromAgent.signals_sent++;
+    if (toAgent) toAgent.signals_received++;
+
+    if (from && to) {
+        const key = `${from}:${to}`;
+        if (STATE.synapses[key]) {
+            STATE.synapses[key].strength = Math.min(2.0, STATE.synapses[key].strength+0.02);
+            STATE.synapses[key].tx++;
+        }
+    }
+
+    STATE.signalLog.unshift({ts, from, to, type, size, label});
+    if (STATE.signalLog.length > 200) STATE.signalLog.pop();
+
+    if (from && to) animateEdge(from, to, type);
+    renderAll();
+}
+
+// ── Renderizado ────────────────────────────────────────────
+function renderAll() {
+    renderAgents();
+    renderMetrics();
+    renderSignalStream();
+    renderDistribution();
+    renderSynapses();
+    computeNodes();
+    drawGraph();
+}
+
+function renderAgents() {
+    const tbody = $('agents-tbody');
+    const agents = Object.values(STATE.agents);
+    $('agent-count').textContent = agents.length;
+
+    if (agents.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:20px;">Sin agentes</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = agents.map(a => {
+        const sent = a.signals_sent || 0;
+        const recv = a.signals_received || 0;
+        const syn = Object.entries(STATE.synapses).find(([k]) => k.startsWith(a.neural_hash));
+        const strength = syn ? syn[1].strength : 0;
+        const pct = Math.min(100, (strength/2)*100);
+        return `<tr>
+            <td class="agent-name">${a.agent_id}</td>
+            <td class="agent-hash">${a.neural_hash.slice(0,8)}</td>
+            <td><span class="stat">⬆️ ${sent}</span> <span class="stat">⬇️ ${recv}</span></td>
+            <td><div class="synapse-mini"><div class="synapse-mini-fill" style="width:${pct}%"></div></div></td>
+        </tr>`;
+    }).join('');
+}
+
+function renderMetrics() {
+    $('m-signals').textContent = STATE.totalSignals;
+    $('m-bytes').textContent = STATE.totalBytes >= 1048576 ? (STATE.totalBytes/1048576).toFixed(1)+'M' : STATE.totalBytes >= 1024 ? (STATE.totalBytes/1024).toFixed(1)+'K' : STATE.totalBytes;
+    $('m-agents').textContent = Object.keys(STATE.agents).length;
+    $('m-queued').textContent = STATE.queued;
+    $('total-signals').textContent = STATE.totalSignals;
+    $('synapse-count').textContent = Object.keys(STATE.synapses).length;
+}
+
+function renderSignalStream() {
+    const container = $('signal-stream');
+    if (STATE.signalLog.length === 0) return;
+    const rows = STATE.signalLog.slice(0, 30).map(s => {
+        const fromName = STATE.agents[s.from]?.agent_id || s.from?.slice(0,6);
+        const toName = s.to ? (STATE.agents[s.to]?.agent_id || s.to.slice(0,6)) : 'BROADCAST';
+        return `<div class="signal-row">
+            <span class="signal-ts">${s.ts}</span>
+            <span class="signal-type type-${s.type}">${s.type}</span>
+            <span class="signal-route">${fromName} → ${toName}</span>
+            <span class="signal-size">${s.size}B</span>
+        </div>`;
+    }).join('');
+    container.innerHTML = rows;
+}
+
+function renderDistribution() {
+    const total = Object.values(STATE.signalCounts).reduce((a,b)=>a+b,0) || 1;
+    const types = ['action','dopamine','norepi','glutamate','gaba','serotonin'];
+    const keys = ['ACTION_POTENTIAL','DOPAMINE','NOREPINEPHRINE','GLUTAMATE','GABA','SEROTONIN'];
+    types.forEach((t, i) => {
+        const cnt = STATE.signalCounts[keys[i]] || 0;
+        $(`dist-${t}`).style.width = (cnt/total*100)+'%';
+        $(`cnt-${t}`).textContent = cnt;
+    });
+}
+
+function renderSynapses() {
+    const tbody = $('synapse-table-body');
+    const entries = Object.entries(STATE.synapses);
+    if (entries.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:16px;">Sin sinapsis</td></tr>';
+        return;
+    }
+    tbody.innerHTML = entries.map(([key, syn]) => {
+        const [src, tgt] = key.split(':');
+        const srcName = STATE.agents[src]?.agent_id || src.slice(0,6);
+        const tgtName = STATE.agents[tgt]?.agent_id || tgt.slice(0,6);
+        const pct = Math.min(100, (syn.strength/2)*100);
+        return `<tr>
+            <td>${srcName}→${tgtName}</td>
+            <td><div class="strength-bar"><div class="strength-fill" style="width:${pct}%"></div></div></td>
+            <td>${((syn.success_rate||0)*100).toFixed(0)}%</td>
+            <td>${syn.tx||0}</td>
+        </tr>`;
+    }).join('');
+}
+
+function updateHubStatus(status) {
+    const dot = $('hub-dot');
+    const text = $('hub-status-text');
+    dot.className = 'dot';
+    if (status === 'online') { dot.classList.add('online'); text.textContent = 'Online'; }
+    else if (status === 'offline') { dot.classList.add('offline'); text.textContent = 'Offline'; }
+    else if (status === 'demo') { dot.classList.add('demo'); text.textContent = 'Demo'; }
+}
+
+// ── Canvas graph (simplificado) ────────────────────────────
+const canvas = $('neural-canvas');
+const ctx = canvas.getContext('2d');
+let nodes = {};
+const ACTIVE_EDGES = [];
+
+function resizeCanvas() {
+    canvas.width = canvas.parentElement.clientWidth;
+    canvas.height = canvas.parentElement.clientHeight;
+    computeNodes();
+    drawGraph();
+}
+function computeNodes() {
+    const agents = Object.keys(STATE.agents);
+    const W = canvas.width, H = canvas.height;
+    const cx = W/2, cy = H/2, r = Math.min(W,H)*0.3;
+    nodes = {};
+    agents.forEach((hash, i) => {
+        const angle = (i/agents.length)*Math.PI*2 - Math.PI/2;
+        nodes[hash] = { x: cx + Math.cos(angle)*r, y: cy + Math.sin(angle)*r, hash, name: STATE.agents[hash]?.agent_id || hash.slice(0,6) };
+    });
+}
+function drawGraph() {
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    if (Object.keys(nodes).length === 0) {
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Sin agentes', canvas.width/2, canvas.height/2);
+        return;
+    }
+    // Draw edges
+    Object.entries(STATE.synapses).forEach(([key, syn]) => {
+        const [src,tgt] = key.split(':');
+        const p1 = nodes[src], p2 = nodes[tgt];
+        if (!p1||!p2) return;
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.strokeStyle = `rgba(59,130,246,${0.2+syn.strength*0.3})`;
+        ctx.lineWidth = 1 + syn.strength*0.5;
+        ctx.stroke();
+    });
+    // Draw nodes
+    Object.values(nodes).forEach(node => {
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, 18, 0, 2*Math.PI);
+        ctx.fillStyle = '#ffffff';
+        ctx.shadowColor = '#cbd5e1';
+        ctx.shadowBlur = 6;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = '#94a3b8';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.fillStyle = '#1e293b';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(node.name, node.x, node.y+26);
+    });
+    // Animate pulses
+    ACTIVE_EDGES.forEach((e,i) => {
+        e.progress += 0.02;
+        if (e.progress >= 1) { ACTIVE_EDGES.splice(i,1); return; }
+        const p1 = nodes[e.from], p2 = nodes[e.to];
+        if (!p1||!p2) return;
+        const x = p1.x + (p2.x-p1.x)*e.progress;
+        const y = p1.y + (p2.y-p1.y)*e.progress;
+        ctx.beginPath();
+        ctx.arc(x, y, 6, 0, 2*Math.PI);
+        ctx.fillStyle = SIG_COLORS[e.type] || '#3b82f6';
+        ctx.shadowColor = SIG_COLORS[e.type];
+        ctx.shadowBlur = 10;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+    });
+}
+function animateEdge(from, to, type) {
+    ACTIVE_EDGES.push({ from, to, type, progress:0 });
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+function animLoop() { drawGraph(); requestAnimationFrame(animLoop); }
+requestAnimationFrame(animLoop);
+
+// ── Inicialización ─────────────────────────────────────────
+// Iniciar polling cada 2 segundos
+setInterval(pollStatus, 2000);
+pollStatus(); // inmediato
+
+// Si después de 3 segundos no hay datos, activar demo
+setTimeout(() => {
+    if (Object.keys(STATE.agents).length === 0 && STATE.mode !== 'demo') {
+        activateDemo();
+    }
+}, 3000);
+</script>
+</body>
+</html>

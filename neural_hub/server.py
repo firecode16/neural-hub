@@ -1,8 +1,7 @@
 """
 NeuralHub — Servidor Central del Protocolo Neural
 ===================================================
-Versión con persistencia SQLite y round-robin automático para múltiples agentes.
-Ahora con soporte opcional para SSL (WSS).
+Versión con persistencia SQLite, round-robin automático y dashboard opcional.
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ import sqlite3
 import ssl
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from neural_protocol.core.signal import NeuralSignal, NeuralSignalType
@@ -99,6 +99,7 @@ class NeuralHub:
         }
 
         self._server: Optional[asyncio.AbstractServer] = None
+        self._dashboard_runner: Optional = None  # para aiohttp
         self._log: List[str] = []
 
         # Inicializar base de datos
@@ -222,9 +223,9 @@ class NeuralHub:
 
     # ── Arranque ──────────────────────────────────────────────────────────
 
-    async def start(self, ssl_context: Optional[ssl.SSLContext] = None) -> None:
+    async def start(self, ssl_context: Optional[ssl.SSLContext] = None, dashboard_port: Optional[int] = None) -> None:
         """
-        Inicia el servidor.
+        Inicia el servidor WebSocket y, opcionalmente, el dashboard HTTP.
         Si se proporciona ssl_context, se usa WSS.
         """
         self._server = await serve_websocket(
@@ -235,17 +236,57 @@ class NeuralHub:
         )
         proto = "wss" if ssl_context else "ws"
         self._info(f"🧠 NeuralHub (persistente) escuchando en {proto}://{self.host}:{self.port} con db {self.db_path}")
+
+        if dashboard_port is not None:
+            await self._start_dashboard(dashboard_port)
+
         asyncio.create_task(self._requeue_loop())
         asyncio.create_task(self._heartbeat_loop())
+
+    async def _start_dashboard(self, port: int) -> None:
+        """Inicia el servidor HTTP del dashboard usando aiohttp."""
+        try:
+            from aiohttp import web
+        except ImportError:
+            self._info("❌ aiohttp no está instalado. Para usar el dashboard ejecuta: pip install neural-hub[dashboard]")
+            return
+
+        # Ruta al archivo HTML (dentro del paquete)
+        html_path = Path(__file__).parent / "dashboard" / "index.html"
+        if not html_path.exists():
+            self._info(f"⚠️ Archivo del dashboard no encontrado en {html_path}")
+            return
+
+        routes = web.RouteTableDef()
+
+        @routes.get('/')
+        async def index(request):
+            return web.FileResponse(html_path)
+
+        @routes.get('/api/status')
+        async def api_status(request):
+            return web.json_response(self.status())
+
+        app = web.Application()
+        app.add_routes(routes)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, self.host, port)
+        await site.start()
+        self._dashboard_runner = runner
+        self._info(f"📊 Dashboard disponible en http://{self.host}:{port}")
 
     async def stop(self) -> None:
         if self._server:
             self._server.close()
             await self._server.wait_closed()
+        if self._dashboard_runner:
+            await self._dashboard_runner.cleanup()
         self._info("🔴 NeuralHub detenido")
 
-    async def serve_forever(self, ssl_context: Optional[ssl.SSLContext] = None) -> None:
-        await self.start(ssl_context)
+    async def serve_forever(self, ssl_context: Optional[ssl.SSLContext] = None, dashboard_port: Optional[int] = None) -> None:
+        await self.start(ssl_context, dashboard_port)
         await asyncio.Event().wait()
 
     # ── Handler de conexión entrante ──────────────────────────────────────
@@ -573,7 +614,7 @@ class NeuralHub:
             "synapses_tracked": len(self._synapses),
             "pending_queues": sum(len(v) for v in self._pending.values()),
             "stats": self._stats,
-            "agents": {a.agent_id: a.info() for a in self._agents.values()},
+            "agents": {a.neural_hash: a.info() for a in self._agents.values()},
             "synapses": {
                 k: {"strength": round(s.strength, 3), "success_rate": round(s.success_rate, 3)}
                 for k, s in self._synapses.items()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Entry point para ejecutar el NeuralHub.
-Uso: python -m neural_hub.scripts.run_hub [--port PORT] [--host HOST] [--ssl] [--cert CERT] [--key KEY]
+Uso: python -m neural_hub.scripts.run_hub [--port PORT] [--host HOST] [--ssl] [--cert CERT] [--key KEY] [--dashboard-port PORT]
 """
 import argparse
 import asyncio
@@ -11,11 +11,12 @@ from neural_hub.server import NeuralHub
 
 async def main():
     parser = argparse.ArgumentParser(description="NeuralHub server")
-    parser.add_argument("--port", type=int, default=8765, help="Port to listen on")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind")
-    parser.add_argument("--ssl", action="store_true", help="Enable WSS (WebSocket Secure)")
-    parser.add_argument("--cert", type=str, default="cert.pem", help="SSL certificate file (PEM)")
-    parser.add_argument("--key", type=str, default="key.pem", help="SSL key file (PEM)")
+    parser.add_argument("--port", type=int, default=8765, help="Puerto para WebSocket")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host a escuchar")
+    parser.add_argument("--ssl", action="store_true", help="Habilitar WSS (WebSocket Secure)")
+    parser.add_argument("--cert", type=str, default="cert.pem", help="Archivo de certificado SSL (PEM)")
+    parser.add_argument("--key", type=str, default="key.pem", help="Archivo de clave SSL (PEM)")
+    parser.add_argument("--dashboard-port", type=int, default=None, help="Puerto para el dashboard web (opcional)")
     args = parser.parse_args()
 
     ssl_context = None
@@ -26,9 +27,11 @@ async def main():
     hub = NeuralHub(host=args.host, port=args.port, db_path=f"neural_hub_{args.port}.db")
     proto = "wss" if args.ssl else "ws"
     print(f"Starting NeuralHub on {proto}://{args.host}:{args.port}")
+    if args.dashboard_port:
+        print(f"Dashboard will be available at http://{args.host}:{args.dashboard_port}")
 
     try:
-        await hub.start(ssl_context)
+        await hub.start(ssl_context, dashboard_port=args.dashboard_port)
         print("Hub iniciado, esperando conexiones... (presiona Ctrl+C para detener)")
         # Mantener el hub corriendo
         while True:

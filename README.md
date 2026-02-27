@@ -303,7 +303,7 @@ Contributions and ideas are welcome!
 
 ## License
 
-MIT © 2025 Firecode16
+MIT © 2026 Firecode16
 
 ---
 

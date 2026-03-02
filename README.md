@@ -20,6 +20,8 @@ It provides:
 - **Message Queue** – stores signals for offline agents and delivers them upon reconnection.
 - **Monitor** – real‑time metrics and heartbeats (with optional web dashboard).
 - **Security** – optional SSL/TLS (WSS) for production.
+- **Federation (NEW!)** – connect multiple hubs together for cross‑organisational B2B communication.  
+  *Phase 1 complete: static configuration, token‑based authentication, and signal forwarding.*
 
 All this while remaining **stateless from the agents' perspective**: they just connect, send logical names, and the hub does the rest.
 
@@ -36,6 +38,7 @@ All this while remaining **stateless from the agents' perspective**: they just c
 ✅ **Heartbeat & metrics** – periodic status logs and a `status` control message.  
 ✅ **Resilience** – agents automatically reconnect with exponential backoff.  
 ✅ **Optional Web Dashboard** – real‑time monitoring of agents, synapses, traffic, and pending queues.  
+✅ **Federation (Fase 1)** – connect hubs across domains with static configuration and token authentication.  
 ✅ **Zero config by default** – works out‑of‑the‑box with `127.0.0.1:8765`.
 
 ---
@@ -97,13 +100,6 @@ neural-hub --dashboard-port 8080
 
 Now visit [http://127.0.0.1:8080](http://127.0.0.1:8080) to see real‑time metrics, connected agents, synapse strengths, and a live signal stream.
 
-The dashboard provides:
-- List of agents with their TX/RX counts.
-- Neural graph visualization.
-- Signal distribution by type.
-- Synaptic database with strength bars.
-- Live signal stream.
-
 ### 3. Connect agents
 
 Agents must use the `WSNeuralAgent` classes from `neural-protocol`. Example:
@@ -147,6 +143,52 @@ While it runs, watch the dashboard update in real time. Output in the terminal:
   Ventas-2 recibió 2 señales
   Ventas-3 recibió 2 señales
 ```
+
+---
+
+## 🌐 Federación entre Hubs (Fase 1)
+
+Ahora puedes conectar múltiples hubs para permitir la comunicación entre agentes de diferentes dominios (por ejemplo, `ventas@empresa-b.com`).  
+La Fase 1 proporciona:
+
+- **Configuración estática** de hubs remotos mediante un archivo JSON.
+- **Autenticación con token compartido** – cada hub valida al otro antes de aceptar mensajes.
+- **Reenvío de señales** – cuando un agente envía un mensaje a `nombre@dominio`, el hub local lo reenvía al hub remoto correspondiente.
+- **Conexiones persistentes** entre hubs con reconexión automática.
+- **TTL y control de bucles** – las señales incluyen un contador TTL para evitar bucles infinitos.
+
+### Configuración de hubs remotos
+
+Cada hub puede definir sus vecinos en un archivo JSON. Ejemplo `remotes.json`:
+
+```json
+{
+    "empresa-b.com": {
+        "url": "wss://hub.empresa-b.com:8765",
+        "token": "secreto123",
+        "enabled": true,
+        "autoconnect": true
+    }
+}
+```
+
+Luego inicia el hub con el parámetro `--remote-hubs`:
+
+```bash
+neural-hub --port 8765 --domain empresa-a.com --remote-hubs remotes.json
+```
+
+El parámetro `--domain` establece la identidad del hub (debe coincidir con la clave que otros hubs usan en sus configuraciones).
+
+### Uso desde los agentes
+
+Los agentes pueden enviar mensajes a destinos remotos usando la notación `nombre@dominio`. Ejemplo:
+
+```python
+await agente.transmit("vendedor@empresa-b.com", NeuralSignalType.NOREPINEPHRINE, {...})
+```
+
+El hub local se encarga de todo el enrutamiento.
 
 ---
 
@@ -232,8 +274,13 @@ No tracebacks, no hanging processes.
                                         │  - Monitor      │
 ┌─────────────────┐     WebSocket      │  - Dashboard    │
 │   Agent C       │◄──────────────────►│    (optional)   │
-│  (ventas #2)    │                     └─────────────────┘
-└─────────────────┘
+│  (ventas #2)    │                     └────────┬────────┘
+└─────────────────┘                              │
+                                                  │  Federation
+                                           ┌──────▼──────┐
+                                           │  Remote Hub │
+                                           │ (empresa-b) │
+                                           └─────────────┘
 ```
 
 - All communication is bidirectional WebSocket (binary frames for signals, JSON for control).
@@ -241,6 +288,18 @@ No tracebacks, no hanging processes.
 - Synapses are stored as `"source_hash:target_hash"` keys with floating‑point strength.
 - The pending queue is per‑target‑hash and survives hub restarts (thanks to SQLite).
 - The optional dashboard runs on a separate HTTP port, serving a single‑page application and a REST API.
+- Federation adds persistent connections between hubs, with automatic reconnection and token authentication.
+
+---
+
+## Robustness & Performance
+
+- **Automatic reconnection** – both agents and hub‑to‑hub connections use exponential backoff.
+- **Message persistence** – signals for offline agents are stored in SQLite and delivered on reconnection.
+- **TTL expiration** – old pending messages are automatically purged.
+- **Heartbeat monitoring** – hubs log regular status updates; dashboard shows live metrics.
+- **Throughput**: A single hub handles thousands of signals per second. Federation adds minimal overhead (JSON wrapping of forwarded signals).
+- **Latency**: <1ms local, 1‑50ms over network, plus network RTT for federated hops.
 
 ---
 
@@ -248,7 +307,7 @@ No tracebacks, no hanging processes.
 
 | Script                          | Description                                                                 |
 |---------------------------------|-----------------------------------------------------------------------------|
-| `neural_hub/scripts/run_hub.py` | Main entry point. Supports `--port`, `--host`, `--ssl`, `--cert`, `--key`, `--dashboard-port`. |
+| `neural_hub/scripts/run_hub.py` | Main entry point. Supports `--port`, `--host`, `--domain`, `--ssl`, `--cert`, `--key`, `--dashboard-port`, `--remote-hubs`. |
 | `neural_hub/scripts/run_roundrobin_demo.py` | Demonstrates round‑robin with 3 sales agents.                             |
 
 Run any script with `python -m neural_hub.scripts.<script_name>`.
@@ -268,6 +327,7 @@ Tests cover:
 - Signal routing (unicast, broadcast, round‑robin).
 - Offline queuing and delivery.
 - Synapse persistence.
+- **Federation basics** (hub registration, forwarding).
 
 ---
 
@@ -276,26 +336,33 @@ Tests cover:
 Your agents should inherit from `neural_protocol.agent.base_ws.WSNeuralAgent` (or use the pre‑built `WSSupportAgent`, `WSSalesAgent`, `WSBillingAgent`).  
 The only requirement is to call `await agent.start()` and implement `handle_signal`.
 
-The hub automatically resolves logical names (e.g., `"ventas"`) and distributes signals if multiple agents share that name.  
-Agents **do not** need to know each other's hashes – just use the logical name in `transmit()`.
+To use federation, simply pass the `domain` parameter when creating the agent:
 
----
+```python
+agent = MyAgent(agent_id="comprador", domain="empresa-a.com", hub_host="localhost", hub_port=8765)
+```
 
-## Performance
-
-- **Throughput**: A single hub can handle thousands of signals per second (limited by network and Python asyncio).  
-- **Latency**: <1ms for local connections, 1‑50ms over a network.  
-- **Database**: SQLite writes are asynchronous and batched – no blocking of signal routing.
-- **Dashboard**: Lightweight polling (every 2 seconds) has negligible impact.
+The agent will automatically include its domain during registration, allowing the hub to route replies correctly.
 
 ---
 
 ## Roadmap
 
-- [ ] **Cluster mode** – multiple hubs sharing state for high availability.
-- [ ] **Authentication** – token‑based agent registration.
-- [ ] **Prometheus metrics** – expose `/metrics` endpoint for monitoring.
-- [ ] **Web dashboard improvements** – historical graphs, search, filtering.
+### ✅ Fase 1: Conexión básica entre hubs (completada)
+- Configuración manual de hubs remotos.
+- Conexión persistente con reconexión automática.
+- Autenticación mediante token compartido.
+- Reenvío de señales con TTL.
+
+### 🔄 Fase 2: Descubrimiento dinámico y presencia (próximo)
+- Intercambio de listas de agentes entre hubs (`HUB_PEER_UPDATE`).
+- Enrutamiento optimizado (el hub sabe de antemano si un destino remoto existe).
+- Heartbeats entre hubs y detección de fallos mejorada.
+
+### ⏳ Fase 3: Alta disponibilidad y balanceo
+- Múltiples hubs por dominio (clúster).
+- Resolución de conflictos de nombres.
+- Sincronización de estado entre réplicas.
 
 Contributions and ideas are welcome!
 
@@ -309,4 +376,3 @@ MIT © 2026 Firecode16
 
 **Built for agents that think together.**  
 Use with [neural‑protocol](https://github.com/firecode16/neural-protocol) to create resilient, self‑learning multi‑agent systems.
-```

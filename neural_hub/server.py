@@ -1,8 +1,9 @@
 """
 NeuralHub — Servidor Central del Protocolo Neural
 ===================================================
-Versión con persistencia SQLite, round-robin automático, dashboard opcional
-y soporte para federación entre hubs (Fase 1). Incluye dominio propio configurable.
+Versión con persistencia SQLite, round-robin automático, dashboard opcional,
+soporte para federación entre hubs (Fase 1), dominio propio configurable
+y API JSON-RPC 2.0 con versionado de métodos.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import sqlite3
 import ssl
 import time
 import urllib.parse
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -36,12 +38,28 @@ from neural_protocol.utils.constants import (
 )
 
 
+# ─────────────────────────────────────────────
+# JSON-RPC 2.0 detection helper
+# ─────────────────────────────────────────────
+
+def is_jsonrpc(data: bytes) -> bool:
+    """
+    Returns True if the raw WebSocket payload looks like a JSON-RPC 2.0 message.
+    Detection is done cheaply (byte search) before full JSON parsing.
+    Coexists with is_ctrl(): a message is never both.
+    """
+    try:
+        return b'"jsonrpc"' in data
+    except Exception:
+        return False
+
+
 @dataclass
 class AgentEntry:
     agent_id: str
     neural_hash: str
     conn: WebSocketConnection
-    domain: Optional[str] = None                # ← dominio del agente (para federación)
+    domain: Optional[str] = None
     connected_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
     signals_received: int = 0
@@ -179,7 +197,6 @@ class RemoteHubConnection:
             self.logger.warning(f"Intento de envío sin conexión a {self.domain}")
             return False
         try:
-            # Extraemos el tipo de control y el resto de parámetros
             ctrl_copy = ctrl.copy()
             ctrl_type = ctrl_copy.pop("_ctrl")
             await self._conn.send(ctrl_msg(ctrl_type, **ctrl_copy))
@@ -200,20 +217,21 @@ class RemoteHubConnection:
 class NeuralHub:
     """
     Servidor central WebSocket del NeuralProtocol con persistencia SQLite y round-robin.
-    Ahora con soporte para federación (conexión a otros hubs) y dominio propio configurable.
+    Ahora con soporte para federación (conexión a otros hubs), dominio propio configurable
+    y API JSON-RPC 2.0 con versionado de métodos (prefijos v1, v2, etc.).
     """
 
     def __init__(
         self,
         host: str = "127.0.0.1",
         port: int = 8765,
-        domain: Optional[str] = None,                     # dominio propio
+        domain: Optional[str] = None,
         db_path: str = "neural_hub.db",
-        remote_hubs: Optional[Dict[str, dict]] = None,    # hubs remotos
+        remote_hubs: Optional[Dict[str, dict]] = None,
     ):
         self.host = host
         self.port = port
-        self.domain = domain or f"{host}:{port}"          # ← valor por defecto
+        self.domain = domain or f"{host}:{port}"
         self.db_path = db_path
         self.remote_hubs = remote_hubs or {}
 
@@ -243,7 +261,7 @@ class NeuralHub:
         }
 
         self._server: Optional[asyncio.AbstractServer] = None
-        self._dashboard_runner: Optional = None  # para aiohttp
+        self._dashboard_runner: Optional = None
         self._log: List[str] = []
         self._running = False
 
@@ -259,7 +277,6 @@ class NeuralHub:
         """Crea las tablas necesarias si no existen."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        # Tabla de sinapsis
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS synapses (
                 src_tgt TEXT PRIMARY KEY,
@@ -272,7 +289,6 @@ class NeuralHub:
                 last_used REAL
             )
         ''')
-        # Tabla de cola de mensajes pendientes
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS pending (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -502,7 +518,7 @@ class NeuralHub:
         # --- A partir de aquí es el flujo normal para agentes ---
         agent_id   = ctrl["agent_id"]
         neural_hash = ctrl["neural_hash"]
-        domain = ctrl.get("domain")  # ← campo opcional
+        domain = ctrl.get("domain")  # campo opcional
 
         # Registrar agente
         entry = AgentEntry(
@@ -615,12 +631,17 @@ class NeuralHub:
 
             entry.touch()
 
-            # Mensajes de control
+            # Prioridad 1: mensajes de control internos (_ctrl)
             if is_ctrl(data):
                 await self._handle_ctrl(entry, parse_ctrl(data))
                 continue
 
-            # Señal neural binaria
+            # Prioridad 2: mensajes JSON-RPC 2.0
+            if is_jsonrpc(data):
+                await self._handle_jsonrpc(entry, data)
+                continue
+
+            # Prioridad 3: señal neural binaria (protocolo original)
             try:
                 signal = NeuralSignal.decode(data)
             except Exception as e:
@@ -632,6 +653,157 @@ class NeuralHub:
             entry.signals_sent += 1
 
             await self._route_signal(signal, data, entry)
+
+    # ── JSON-RPC 2.0 ──────────────────────────────────────────────────────
+
+    async def _handle_jsonrpc(self, entry: AgentEntry, data: bytes) -> None:
+        """
+        Entry point for JSON-RPC 2.0 messages received over WebSocket.
+
+        Validates the envelope (jsonrpc=="2.0"), extracts method/params/id,
+        delegates to _dispatch_jsonrpc, and sends back a spec-compliant
+        response.  Notifications (no "id") are processed silently.
+        """
+        req_id: Optional[str] = None
+        try:
+            request = json.loads(data)
+        except json.JSONDecodeError as exc:
+            # Parse error — can't recover id, send id=null per spec
+            error_resp = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": f"Parse error: {exc}"},
+            }
+            await entry.conn.send(json.dumps(error_resp).encode())
+            return
+
+        req_id = request.get("id")          # None for Notifications
+        method  = request.get("method", "")
+        params  = request.get("params") or {}
+
+        # Validate jsonrpc version
+        if request.get("jsonrpc") != "2.0":
+            if req_id is not None:
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32600, "message": "Invalid Request: jsonrpc must be '2.0'"},
+                }
+                await entry.conn.send(json.dumps(resp).encode())
+            return
+
+        try:
+            result = await self._dispatch_jsonrpc(method, params, entry)
+            # Only send a response when the caller provided an id
+            if req_id is not None:
+                resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
+                await entry.conn.send(json.dumps(resp).encode())
+        except KeyError as exc:
+            if req_id is not None:
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32602, "message": f"Invalid params: {exc}"},
+                }
+                await entry.conn.send(json.dumps(resp).encode())
+        except NotImplementedError:
+            if req_id is not None:
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32601, "message": f"Method not found: {method}"},
+                }
+                await entry.conn.send(json.dumps(resp).encode())
+        except Exception as exc:
+            self.logger.exception(f"JSON-RPC internal error in '{method}': {exc}")
+            if req_id is not None:
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32603, "message": f"Internal error: {exc}"},
+                }
+                await entry.conn.send(json.dumps(resp).encode())
+
+    async def _dispatch_jsonrpc(
+        self,
+        method: str,
+        params: dict,
+        entry: AgentEntry,
+    ) -> Any:
+        """
+        Maps JSON-RPC method strings to hub operations, with support for
+        version prefixes (e.g., "v1.agent.list", "v2.agent.list").
+
+        Supported versions: v1 (default)
+        If no prefix is given, "v1." is assumed.
+
+        Raises NotImplementedError for unknown methods.
+        """
+        SUPPORTED_VERSIONS = {"v1"}
+        version = "v1"
+        base_method = method
+
+        # Extract version prefix if present (e.g., "v1.agent.list" → "agent.list", version="v1")
+        if '.' in method and method[0] == 'v' and method[1].isdigit():
+            version_part, base_method = method.split('.', 1)
+            version = version_part
+
+        if version not in SUPPORTED_VERSIONS:
+            raise NotImplementedError(f"Version {version} not supported (supported: {SUPPORTED_VERSIONS})")
+
+        # ── hub.status ────────────────────────────────────────────────────
+        if base_method == "hub.status":
+            return self.status()
+
+        # ── hub.ping ──────────────────────────────────────────────────────
+        if base_method == "hub.ping":
+            return {"pong": True, "ts": time.time()}
+
+        # ── agent.list ────────────────────────────────────────────────────
+        if base_method == "agent.list":
+            return {
+                "agents": [
+                    a.info() for a in self._agents.values()
+                ]
+            }
+
+        # ── agent.discover ────────────────────────────────────────────────
+        if base_method == "agent.discover":
+            name = params["name"]          # raises KeyError → -32602 if missing
+            neural_hash = self._names.get(name)
+            return {
+                "agent_id":    name,
+                "neural_hash": neural_hash,
+                "online":      neural_hash in self._agents if neural_hash else False,
+            }
+
+        # ── agent.transmit ────────────────────────────────────────────────
+        if base_method == "agent.transmit":
+            target      = params["target"]       # required
+            sig_type_str = params["signal_type"] # required — name of NeuralSignalType
+            payload     = params.get("payload", {})
+            try:
+                sig_type = NeuralSignalType[sig_type_str]
+            except KeyError:
+                raise KeyError(
+                    f"signal_type '{sig_type_str}' is not a valid NeuralSignalType. "
+                    f"Valid values: {[e.name for e in NeuralSignalType]}"
+                )
+            signal = NeuralSignal(
+                signal_type=sig_type,
+                source=entry.neural_hash,
+                target=target,
+                payload=payload,
+            )
+            raw = signal.encode()
+            self._stats["total_signals"] += 1
+            self._stats["total_bytes"] += len(raw)
+            entry.signals_sent += 1
+            await self._route_signal(signal, raw, entry)
+            return {"delivered": True, "msg_id": signal.msg_id}
+
+        # ── unknown method ────────────────────────────────────────────────
+        raise NotImplementedError(method)
 
     # ── Control messages ─────────────────────────────────────────────────
 
@@ -768,18 +940,16 @@ class NeuralHub:
 
     async def _forward_to_remote(self, domain: str, signal: NeuralSignal, raw: bytes, sender: AgentEntry, target_agent: str) -> bool:
         """Reenvía una señal a un hub remoto."""
-        # Buscar conexión saliente o entrante? Preferimos saliente (nosotros iniciamos)
         conn = self._outgoing_remote_connections.get(domain)
         if not conn:
             self._info(f"🚫 No hay conexión saliente activa al hub {domain}")
             return False
 
-        # Construir mensaje FWD_SIGNAL
         fwd_msg = {
             "_ctrl": CTRL_FWD_SIGNAL,
             "from_hub": self._get_my_domain(),
             "to_hub": domain,
-            "original_signal": raw.hex(),   # enviamos en hex para evitar problemas binarios en JSON
+            "original_signal": raw.hex(),
             "src_agent": signal.source,
             "tgt_agent": target_agent,
             "ttl": signal.ttl - 1,
@@ -789,7 +959,7 @@ class NeuralHub:
     async def _handle_fwd_signal(self, ctrl: dict) -> None:
         """Procesa una señal reenviada desde otro hub."""
         from_hub = ctrl.get("from_hub")
-        to_hub = ctrl.get("to_hub")  # debería ser este hub
+        to_hub = ctrl.get("to_hub")
         original_signal_hex = ctrl.get("original_signal")
         src_agent = ctrl.get("src_agent")
         tgt_agent = ctrl.get("tgt_agent")
@@ -799,7 +969,6 @@ class NeuralHub:
             self._info(f"⏱️  TTL agotado en mensaje de {from_hub}")
             return
 
-        # Reconstruir la señal original
         try:
             original_bytes = bytes.fromhex(original_signal_hex)
             signal = NeuralSignal.decode(original_bytes)
@@ -809,9 +978,7 @@ class NeuralHub:
 
         self._info(f"📨 Señal reenviada desde {from_hub} para {tgt_agent}")
 
-        # Enrutar localmente, pero manteniendo el source original
         signal.target = tgt_agent
-        # Buscar el agente local por nombre (round-robin si es necesario)
         await self._route_local(signal, original_bytes, src_agent)
 
     async def _route_local(self, signal: NeuralSignal, raw: bytes, original_src: str) -> None:
@@ -820,10 +987,8 @@ class NeuralHub:
         hashes = self._agents_by_name.get(target_name, [])
         if not hashes:
             self._info(f"⚠️  Agente local '{target_name}' no encontrado para mensaje reenviado")
-            # Opcional: notificar al hub origen del error
             return
 
-        # Round-robin simple (podríamos usar el mismo índice)
         idx = self._rr_index.get(target_name, 0)
         target_hash = hashes[idx % len(hashes)]
         self._rr_index[target_name] = (idx + 1) % len(hashes)

@@ -20,8 +20,9 @@ It provides:
 - **Message Queue** – stores signals for offline agents and delivers them upon reconnection.
 - **Monitor** – real‑time metrics and heartbeats (with optional web dashboard).
 - **Security** – optional SSL/TLS (WSS) for production.
-- **Federation (NEW!)** – connect multiple hubs together for cross‑organisational B2B communication.  
+- **Federation** – connect multiple hubs together for cross‑organisational B2B communication.  
   *Phase 1 complete: static configuration, token‑based authentication, and signal forwarding.*
+- **JSON‑RPC 2.0 API** – expose hub functionality (status, discovery, signal transmission) via a standard RPC interface, with versioned methods for future evolution.
 
 All this while remaining **stateless from the agents' perspective**: they just connect, send logical names, and the hub does the rest.
 
@@ -39,6 +40,7 @@ All this while remaining **stateless from the agents' perspective**: they just c
 ✅ **Resilience** – agents automatically reconnect with exponential backoff.  
 ✅ **Optional Web Dashboard** – real‑time monitoring of agents, synapses, traffic, and pending queues.  
 ✅ **Federation (Fase 1)** – connect hubs across domains with static configuration and token authentication.  
+✅ **JSON‑RPC 2.0 API** – rich RPC interface with versioned methods (`v1.hub.status`, `v1.agent.list`, etc.).  
 ✅ **Zero config by default** – works out‑of‑the‑box with `127.0.0.1:8765`.
 
 ---
@@ -143,6 +145,71 @@ While it runs, watch the dashboard update in real time. Output in the terminal:
   Ventas-2 recibió 2 señales
   Ventas-3 recibió 2 señales
 ```
+
+---
+
+## 📡 JSON‑RPC 2.0 API
+
+The hub exposes a rich JSON‑RPC 2.0 API over the same WebSocket connection (and future HTTP transport). This allows external tools, monitoring systems, or agents themselves to interact programmatically with the hub.
+
+### Versioning
+
+Methods can include a version prefix (e.g., `v1.agent.list`). If no prefix is given, the hub assumes `v1`. This allows future evolution without breaking existing clients.
+
+**Supported versions:** `v1`
+
+### Methods
+
+| Method | Versions | Description | Parameters | Returns |
+|--------|----------|-------------|------------|---------|
+| `hub.status` | v1 | Get hub status and statistics | (none) | Hub status object |
+| `hub.ping` | v1 | Health check | (none) | `{"pong": true, "ts": timestamp}` |
+| `agent.list` | v1 | List all connected agents | (none) | `{"agents": [agent_info, ...]}` |
+| `agent.discover` | v1 | Get info about a specific agent | `{"name": agent_id}` | `{"agent_id": str, "neural_hash": str, "online": bool}` |
+| `agent.transmit` | v1 | Transmit a neural signal on behalf of an agent | `{"target": str, "signal_type": str, "payload": object}` | `{"delivered": true, "msg_id": str}` |
+
+### Example Usage
+
+#### From a Python agent (using `WSNeuralAgent`)
+
+```python
+# Call with explicit version
+status = await agent.jsonrpc_call("v1.hub.status")
+
+# Or without version (defaults to v1)
+agents = await agent.jsonrpc_call("agent.list")
+
+# Notification (no response)
+await agent.jsonrpc_notify("hub.ping")
+```
+
+#### From any WebSocket client (e.g., JavaScript)
+
+```javascript
+const ws = new WebSocket("ws://localhost:8765");
+ws.onopen = () => {
+  const request = {
+    jsonrpc: "2.0",
+    method: "agent.list",
+    id: 1
+  };
+  ws.send(JSON.stringify(request));
+};
+ws.onmessage = (event) => {
+  const response = JSON.parse(event.data);
+  console.log(response.result);
+};
+```
+
+### Error Codes
+
+| Code | Meaning |
+|------|---------|
+| -32700 | Parse error (invalid JSON) |
+| -32600 | Invalid Request (missing jsonrpc field, wrong version) |
+| -32601 | Method not found |
+| -32602 | Invalid params (missing required field or wrong type) |
+| -32603 | Internal error |
 
 ---
 
@@ -283,12 +350,13 @@ No tracebacks, no hanging processes.
                                            └─────────────┘
 ```
 
-- All communication is bidirectional WebSocket (binary frames for signals, JSON for control).
+- All communication is bidirectional WebSocket (binary frames for signals, JSON for control and JSON‑RPC).
 - The hub never initiates messages – it only reacts to incoming data.
 - Synapses are stored as `"source_hash:target_hash"` keys with floating‑point strength.
 - The pending queue is per‑target‑hash and survives hub restarts (thanks to SQLite).
 - The optional dashboard runs on a separate HTTP port, serving a single‑page application and a REST API.
 - Federation adds persistent connections between hubs, with automatic reconnection and token authentication.
+- JSON‑RPC methods are versioned (e.g., `v1.agent.list`) for future compatibility.
 
 ---
 
@@ -298,6 +366,7 @@ No tracebacks, no hanging processes.
 - **Message persistence** – signals for offline agents are stored in SQLite and delivered on reconnection.
 - **TTL expiration** – old pending messages are automatically purged.
 - **Heartbeat monitoring** – hubs log regular status updates; dashboard shows live metrics.
+- **JSON‑RPC resilience** – malformed requests are rejected with proper error codes; internal exceptions are caught and reported.
 - **Throughput**: A single hub handles thousands of signals per second. Federation adds minimal overhead (JSON wrapping of forwarded signals).
 - **Latency**: <1ms local, 1‑50ms over network, plus network RTT for federated hops.
 
@@ -328,6 +397,7 @@ Tests cover:
 - Offline queuing and delivery.
 - Synapse persistence.
 - **Federation basics** (hub registration, forwarding).
+- **JSON‑RPC API** (all methods, error handling, versioning).
 
 ---
 
@@ -344,6 +414,8 @@ agent = MyAgent(agent_id="comprador", domain="empresa-a.com", hub_host="localhos
 
 The agent will automatically include its domain during registration, allowing the hub to route replies correctly.
 
+To use the JSON‑RPC API from an agent, call `agent.jsonrpc_call()` or `agent.jsonrpc_notify()` as shown in the examples.
+
 ---
 
 ## Roadmap
@@ -353,16 +425,19 @@ The agent will automatically include its domain during registration, allowing th
 - Conexión persistente con reconexión automática.
 - Autenticación mediante token compartido.
 - Reenvío de señales con TTL.
+- **JSON‑RPC 2.0 API básica** (`hub.status`, `agent.list`, `agent.transmit`).
 
 ### 🔄 Fase 2: Descubrimiento dinámico y presencia (próximo)
 - Intercambio de listas de agentes entre hubs (`HUB_PEER_UPDATE`).
 - Enrutamiento optimizado (el hub sabe de antemano si un destino remoto existe).
 - Heartbeats entre hubs y detección de fallos mejorada.
+- **Ampliación de la API JSON‑RPC** para soportar consultas de presencia remota.
 
 ### ⏳ Fase 3: Alta disponibilidad y balanceo
 - Múltiples hubs por dominio (clúster).
 - Resolución de conflictos de nombres.
 - Sincronización de estado entre réplicas.
+- **Versionado completo de API** y documentación OpenAPI.
 
 Contributions and ideas are welcome!
 

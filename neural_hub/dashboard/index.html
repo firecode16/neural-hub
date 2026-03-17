@@ -209,6 +209,7 @@
             flex: 1;
             position: relative;
             background: var(--surface);
+            padding-bottom: 20px;
         }
         #neural-canvas {
             width: 100%;
@@ -460,7 +461,7 @@
 
 <script>
 // ═══════════════════════════════════════════════════════════
-// NEURAL HUB DASHBOARD — Polling HTTP
+// NEURAL HUB DASHBOARD — Polling HTTP + Canvas mejorado
 // ═══════════════════════════════════════════════════════════
 
 const $ = id => document.getElementById(id);
@@ -537,40 +538,90 @@ async function pollStatus() {
     }
 }
 
-// ── Modo demo ───────────────────────────
+// ── Modo demo mejorado: nombres aleatorios de sectores, múltiples dominios ──
 function activateDemo() {
     STATE.mode = 'demo';
     updateHubStatus('demo');
-    STATE.agents = {
-        'a7cd9dc4f211': { agent_id:'soporte', neural_hash:'a7cd9dc4f211', signals_sent:0, signals_received:0 },
-        'f14ef82f8a33': { agent_id:'ventas1', neural_hash:'f14ef82f8a33', signals_sent:0, signals_received:0 },
-        '28108417cc91': { agent_id:'ventas2', neural_hash:'28108417cc91', signals_sent:0, signals_received:0 },
-    };
-    STATE.synapses = {
-        'a7cd9dc4f211:f14ef82f8a33': { strength:1.2, success_rate:0.85, tx:34 },
-        'a7cd9dc4f211:28108417cc91': { strength:0.9, success_rate:0.72, tx:21 },
-    };
+
+    const sectores = ['ventas', 'compras', 'logistica', 'facturacion', 'soporte', 'marketing', 'rrhh', 'produccion', 'calidad', 'it'];
+    const dominios = ['empresa-a.com', 'empresa-b.com', 'empresa-c.com'];
+    const numAgentes = Math.floor(Math.random() * 4) + 4; // entre 4 y 7
+
+    const agents = {};
+    const hashes = [];
+
+    for (let i = 0; i < numAgentes; i++) {
+        const sector = sectores[Math.floor(Math.random() * sectores.length)];
+        const numero = Math.floor(Math.random() * 3) + 1; // sufijo 1-3
+        const nombre = `${sector}_${numero}`;
+        const hash = Math.random().toString(16).substring(2, 14); // hash simulado
+        const dominio = dominios[Math.floor(Math.random() * dominios.length)];
+
+        agents[hash] = {
+            agent_id: nombre,
+            neural_hash: hash,
+            domain: dominio,
+            signals_sent: 0,
+            signals_received: 0
+        };
+        hashes.push(hash);
+    }
+
+    STATE.agents = agents;
+
+    // Crear algunas sinapsis aleatorias entre ellos
+    const synapses = {};
+    for (let i = 0; i < hashes.length; i++) {
+        for (let j = i+1; j < hashes.length; j++) {
+            if (Math.random() > 0.6) { // 40% de probabilidad de conexión
+                const key = `${hashes[i]}:${hashes[j]}`;
+                synapses[key] = {
+                    strength: 0.5 + Math.random() * 1.5,
+                    success_rate: 0.7 + Math.random() * 0.25,
+                    tx: Math.floor(Math.random() * 50)
+                };
+            }
+        }
+    }
+    STATE.synapses = synapses;
+
+    // Guardar hashes para la simulación
+    window.demoHashes = hashes;
+
     renderAll();
     startDemoSimulation();
 }
 
-const DEMO_FLOWS = [
-    { from:'a7cd9dc4f211', to:'f14ef82f8a33', type:'NOREPINEPHRINE', size:264, label:'consulta' },
-    { from:'f14ef82f8a33', to:'28108417cc91', type:'GLUTAMATE', size:209, label:'venta' },
-    { from:'28108417cc91', to:'', type:'DOPAMINE', size:224, label:'pago' },
-];
+// Simulación de tráfico en modo demo (usa agentes aleatorios)
+const SIGNAL_TYPES = ['ACTION_POTENTIAL', 'DOPAMINE', 'NOREPINEPHRINE', 'GLUTAMATE', 'GABA', 'SEROTONIN'];
 let demoInterval;
+
 function startDemoSimulation() {
     if (demoInterval) clearInterval(demoInterval);
     demoInterval = setInterval(() => {
-        const flow = DEMO_FLOWS[Math.floor(Math.random() * DEMO_FLOWS.length)];
-        injectSignal(flow);
+        const hashes = window.demoHashes;
+        if (!hashes || hashes.length < 2) return;
+
+        // Elegir origen y destino distintos
+        const srcIdx = Math.floor(Math.random() * hashes.length);
+        let tgtIdx;
+        do {
+            tgtIdx = Math.floor(Math.random() * hashes.length);
+        } while (tgtIdx === srcIdx);
+
+        const from = hashes[srcIdx];
+        const to = hashes[tgtIdx];
+        const type = SIGNAL_TYPES[Math.floor(Math.random() * SIGNAL_TYPES.length)];
+        const size = Math.floor(Math.random() * 200) + 100; // 100-300 bytes
+
+        injectSignal({ from, to, type, size });
     }, 2000);
 }
-function injectSignal({from, to, type, size, label}) {
+
+function injectSignal({ from, to, type, size }) {
     const ts = new Date().toLocaleTimeString('es', {hour12:false});
     const fromAgent = STATE.agents[from];
-    const toAgent = to ? STATE.agents[to] : null;
+    const toAgent = STATE.agents[to];
 
     STATE.totalSignals++;
     STATE.totalBytes += size;
@@ -579,15 +630,14 @@ function injectSignal({from, to, type, size, label}) {
     if (fromAgent) fromAgent.signals_sent++;
     if (toAgent) toAgent.signals_received++;
 
-    if (from && to) {
-        const key = `${from}:${to}`;
-        if (STATE.synapses[key]) {
-            STATE.synapses[key].strength = Math.min(2.0, STATE.synapses[key].strength+0.02);
-            STATE.synapses[key].tx++;
-        }
+    // Reforzar sinapsis si existe
+    const key = `${from}:${to}`;
+    if (STATE.synapses[key]) {
+        STATE.synapses[key].strength = Math.min(2.0, STATE.synapses[key].strength + 0.02);
+        STATE.synapses[key].tx++;
     }
 
-    STATE.signalLog.unshift({ts, from, to, type, size, label});
+    STATE.signalLog.unshift({ts, from, to, type, size});
     if (STATE.signalLog.length > 200) STATE.signalLog.pop();
 
     if (from && to) animateEdge(from, to, type);
@@ -601,8 +651,7 @@ function renderAll() {
     renderSignalStream();
     renderDistribution();
     renderSynapses();
-    computeNodes();
-    drawGraph();
+    // computeNodes se llamará si cambian agentes (en animLoop)
 }
 
 function renderAgents() {
@@ -696,67 +745,141 @@ function updateHubStatus(status) {
     else if (status === 'demo') { dot.classList.add('demo'); text.textContent = 'Demo'; }
 }
 
-// ── Canvas graph (simplificado) ────────────────────────────
+// ── Canvas mejorado con hexágonos y soporte Retina ──────────
 const canvas = $('neural-canvas');
 const ctx = canvas.getContext('2d');
 let nodes = {};
+let lastAgentHash = '';
 const ACTIVE_EDGES = [];
 
+// Ajuste por densidad de píxeles
 function resizeCanvas() {
-    canvas.width = canvas.parentElement.clientWidth;
-    canvas.height = canvas.parentElement.clientHeight;
+    const parent = canvas.parentElement;
+    const w = parent.clientWidth;
+    const h = parent.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);  // escalar contexto
     computeNodes();
     drawGraph();
 }
+
+// Calcula posiciones (layout circular fijo)
 function computeNodes() {
     const agents = Object.keys(STATE.agents);
-    const W = canvas.width, H = canvas.height;
-    const cx = W/2, cy = H/2, r = Math.min(W,H)*0.3;
+    const W = canvas.width / (window.devicePixelRatio || 1);
+    const H = canvas.height / (window.devicePixelRatio || 1);
+    const cx = W/2, cy = H/2, r = Math.min(W,H) * 0.25;
     nodes = {};
     agents.forEach((hash, i) => {
         const angle = (i/agents.length)*Math.PI*2 - Math.PI/2;
-        nodes[hash] = { x: cx + Math.cos(angle)*r, y: cy + Math.sin(angle)*r, hash, name: STATE.agents[hash]?.agent_id || hash.slice(0,6) };
+        nodes[hash] = {
+            x: cx + Math.cos(angle)*r,
+            y: cy + Math.sin(angle)*r,
+            hash,
+            name: STATE.agents[hash]?.agent_id || hash.slice(0,6),
+            domain: STATE.agents[hash]?.domain || 'local'
+        };
     });
 }
+
+// Dibuja un hexágono (centro x,y, radio)
+function drawHexagon(x, y, r, fillStyle, strokeStyle) {
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+        const angle = i * Math.PI/3;
+        const px = x + r * Math.cos(angle);
+        const py = y + r * Math.sin(angle);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = fillStyle;
+    ctx.fill();
+    ctx.strokeStyle = strokeStyle;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+}
+
 function drawGraph() {
     ctx.clearRect(0,0,canvas.width,canvas.height);
+    const dpr = window.devicePixelRatio || 1;
+    ctx.save();
+    ctx.scale(dpr, dpr);  // trabajamos en coordenadas lógicas
+
     if (Object.keys(nodes).length === 0) {
         ctx.fillStyle = '#94a3b8';
         ctx.font = '12px sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText('Sin agentes', canvas.width/2, canvas.height/2);
+        ctx.fillText('Sin agentes', canvas.width/dpr/2, canvas.height/dpr/2);
+        ctx.restore();
         return;
     }
-    // Draw edges
+
+    // 1. Dibujar conexiones potenciales (gris tenue) entre agentes del mismo dominio
+    const domainGroups = {};
+    Object.values(nodes).forEach(node => {
+        const dom = node.domain || 'unknown';
+        if (!domainGroups[dom]) domainGroups[dom] = [];
+        domainGroups[dom].push(node);
+    });
+    ctx.save();
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.lineWidth = 0.5;
+    ctx.globalAlpha = 0.2;
+    Object.values(domainGroups).forEach(group => {
+        for (let i = 0; i < group.length; i++) {
+            for (let j = i+1; j < group.length; j++) {
+                ctx.beginPath();
+                ctx.moveTo(group[i].x, group[i].y);
+                ctx.lineTo(group[j].x, group[j].y);
+                ctx.stroke();
+            }
+        }
+    });
+    ctx.restore();
+
+    // 2. Dibujar sinapsis reales (con fuerza)
     Object.entries(STATE.synapses).forEach(([key, syn]) => {
-        const [src,tgt] = key.split(':');
+        const [src, tgt] = key.split(':');
         const p1 = nodes[src], p2 = nodes[tgt];
         if (!p1||!p2) return;
         ctx.beginPath();
         ctx.moveTo(p1.x, p1.y);
         ctx.lineTo(p2.x, p2.y);
-        ctx.strokeStyle = `rgba(59,130,246,${0.2+syn.strength*0.3})`;
-        ctx.lineWidth = 1 + syn.strength*0.5;
+        ctx.strokeStyle = `rgba(59,130,246,${0.3 + syn.strength*0.3})`;
+        ctx.lineWidth = 1 + syn.strength;
         ctx.stroke();
     });
-    // Draw nodes
+
+    // 3. Dibujar nodos (hexágonos)
     Object.values(nodes).forEach(node => {
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, 18, 0, 2*Math.PI);
-        ctx.fillStyle = '#ffffff';
-        ctx.shadowColor = '#cbd5e1';
-        ctx.shadowBlur = 6;
-        ctx.fill();
-        ctx.shadowBlur = 0;
-        ctx.strokeStyle = '#94a3b8';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
+        // Color según dominio
+        let fillColor = '#ffffff';
+        if (node.domain === 'empresa-a.com') fillColor = '#dbeafe';
+        else if (node.domain === 'empresa-b.com') fillColor = '#dcfce7';
+        else fillColor = '#f1f5f9';
+
+        drawHexagon(node.x, node.y, 16, fillColor, '#64748b');
+
+        // Ícono robot (🤖) dentro
         ctx.fillStyle = '#1e293b';
-        ctx.font = 'bold 12px sans-serif';
+        ctx.font = '14px sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText(node.name, node.x, node.y+26);
+        ctx.textBaseline = 'middle';
+        ctx.fillText('🤖', node.x, node.y-1);
+
+        // Nombre debajo
+        ctx.fillStyle = '#1e293b';
+        ctx.font = '9px sans-serif';
+        ctx.textBaseline = 'top';
+        ctx.fillText(node.name, node.x, node.y + 20);
     });
-    // Animate pulses
+
+    // 4. Animación de pulsos
     ACTIVE_EDGES.forEach((e,i) => {
         e.progress += 0.02;
         if (e.progress >= 1) { ACTIVE_EDGES.splice(i,1); return; }
@@ -772,13 +895,35 @@ function drawGraph() {
         ctx.fill();
         ctx.shadowBlur = 0;
     });
+
+    ctx.restore();
 }
+
+// Detectar cambios en agentes para actualizar layout
+function agentsChanged() {
+    const currentHash = Object.keys(STATE.agents).sort().join(',');
+    if (currentHash !== lastAgentHash) {
+        lastAgentHash = currentHash;
+        return true;
+    }
+    return false;
+}
+
 function animateEdge(from, to, type) {
     ACTIVE_EDGES.push({ from, to, type, progress:0 });
 }
+
+// Bucle de animación
+function animLoop() {
+    if (agentsChanged()) {
+        computeNodes();
+    }
+    drawGraph();
+    requestAnimationFrame(animLoop);
+}
+
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
-function animLoop() { drawGraph(); requestAnimationFrame(animLoop); }
 requestAnimationFrame(animLoop);
 
 // ── Inicialización ─────────────────────────────────────────

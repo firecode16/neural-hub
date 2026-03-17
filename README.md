@@ -20,9 +20,9 @@ It provides:
 - **Message Queue** – stores signals for offline agents and delivers them upon reconnection.
 - **Monitor** – real‑time metrics and heartbeats (with optional web dashboard).
 - **Security** – optional SSL/TLS (WSS) for production.
-- **Federation** – connect multiple hubs together for cross‑organisational B2B communication.  
-  *Phase 1 complete: static configuration, token‑based authentication, and signal forwarding.*
-- **JSON‑RPC 2.0 API** – expose hub functionality (status, discovery, signal transmission) via a standard RPC interface, with versioned methods for future evolution.
+- **Federation (Fase 2)** – dynamic discovery and presence between hubs.  
+  *Hubs now exchange agent lists in real time, enabling optimized routing and availability checks.*
+- **JSON‑RPC 2.0 API** – expose hub functionality (status, discovery, signal transmission, remote agent queries) via a standard RPC interface, with versioned methods for future evolution.
 
 All this while remaining **stateless from the agents' perspective**: they just connect, send logical names, and the hub does the rest.
 
@@ -39,8 +39,8 @@ All this while remaining **stateless from the agents' perspective**: they just c
 ✅ **Heartbeat & metrics** – periodic status logs and a `status` control message.  
 ✅ **Resilience** – agents automatically reconnect with exponential backoff.  
 ✅ **Optional Web Dashboard** – real‑time monitoring of agents, synapses, traffic, and pending queues.  
-✅ **Federation (Fase 1)** – connect hubs across domains with static configuration and token authentication.  
-✅ **JSON‑RPC 2.0 API** – rich RPC interface with versioned methods (`v1.hub.status`, `v1.agent.list`, etc.).  
+✅ **Federation (Fase 2)** – dynamic discovery, presence tracking, and heartbeat between hubs.  
+✅ **JSON‑RPC 2.0 API** – rich RPC interface with versioned methods (`v1.hub.status`, `v1.agent.list`, `v1.remote_agent.discover`, etc.).  
 ✅ **Zero config by default** – works out‑of‑the‑box with `127.0.0.1:8765`.
 
 ---
@@ -91,7 +91,7 @@ You'll see heartbeat messages every 30 seconds:
 
 ```
 [14:23:03] HUB | 🧠 NeuralHub (persistente) escuchando en ws://127.0.0.1:8765 con db neural_hub_8765.db
-[14:23:33] HUB | 💓 Heartbeat | agentes=0 señales=0 bytes=0 pendientes=0 uptime=30s
+[14:23:33] HUB | 💓 Heartbeat | agentes=0 señales=0 bytes=0 pendientes=0 remotos=0 uptime=30s
 ```
 
 ### 2. (Optional) Launch the monitoring dashboard
@@ -167,20 +167,25 @@ Methods can include a version prefix (e.g., `v1.agent.list`). If no prefix is gi
 | `agent.list` | v1 | List all connected agents | (none) | `{"agents": [agent_info, ...]}` |
 | `agent.discover` | v1 | Get info about a specific agent | `{"name": agent_id}` | `{"agent_id": str, "neural_hash": str, "online": bool}` |
 | `agent.transmit` | v1 | Transmit a neural signal on behalf of an agent | `{"target": str, "signal_type": str, "payload": object}` | `{"delivered": true, "msg_id": str}` |
+| **`remote_agent.discover`** | v1 | Check availability of a remote agent (from federated hubs) | `{"name": "nombre@dominio"}` | `{"exists": bool, "online": bool, "last_seen": float}` |
+| **`hub.remote_agents`** | v1 | List all known remote agents from federated hubs | (optional `{"domain": "..."}`) | `{"agents": [{"name": str, "domain": str, "hash": str, "online": bool, "last_seen": float}]}` |
 
 ### Example Usage
 
 #### From a Python agent (using `WSNeuralAgent`)
 
 ```python
-# Call with explicit version
-status = await agent.jsonrpc_call("v1.hub.status")
+# Check if a remote agent is available before sending
+info = await agent.jsonrpc_call("remote_agent.discover", {"name": "vendedor@empresa-b.com"})
+if info["online"]:
+    await agent.transmit("vendedor@empresa-b.com", NeuralSignalType.NOREPINEPHRINE, {...})
+else:
+    print("Remote agent is offline")
 
-# Or without version (defaults to v1)
-agents = await agent.jsonrpc_call("agent.list")
-
-# Notification (no response)
-await agent.jsonrpc_notify("hub.ping")
+# List all remote agents
+remotes = await agent.jsonrpc_call("hub.remote_agents")
+for ra in remotes["agents"]:
+    print(f"{ra['name']}@{ra['domain']} - online: {ra['online']}")
 ```
 
 #### From any WebSocket client (e.g., JavaScript)
@@ -190,7 +195,8 @@ const ws = new WebSocket("ws://localhost:8765");
 ws.onopen = () => {
   const request = {
     jsonrpc: "2.0",
-    method: "agent.list",
+    method: "remote_agent.discover",
+    params: { name: "vendedor@empresa-b.com" },
     id: 1
   };
   ws.send(JSON.stringify(request));
@@ -213,20 +219,20 @@ ws.onmessage = (event) => {
 
 ---
 
-## 🌐 Federación entre Hubs (Fase 1)
+## 🌐 Federación entre Hubs (Fase 2: Descubrimiento Dinámico)
 
-Ahora puedes conectar múltiples hubs para permitir la comunicación entre agentes de diferentes dominios (por ejemplo, `ventas@empresa-b.com`).  
-La Fase 1 proporciona:
+Ahora los hubs pueden intercambiar información en tiempo real sobre los agentes disponibles, permitiendo enrutamiento optimizado y consultas de presencia antes de enviar señales.
 
-- **Configuración estática** de hubs remotos mediante un archivo JSON.
-- **Autenticación con token compartido** – cada hub valida al otro antes de aceptar mensajes.
-- **Reenvío de señales** – cuando un agente envía un mensaje a `nombre@dominio`, el hub local lo reenvía al hub remoto correspondiente.
-- **Conexiones persistentes** entre hubs con reconexión automática.
-- **TTL y control de bucles** – las señales incluyen un contador TTL para evitar bucles infinitos.
+### Novedades en Fase 2
 
-### Configuración de hubs remotos
+- **Intercambio automático de listas de agentes** (`HUB_PEER_UPDATE`): cuando un agente se conecta o desconecta, todos los hubs remotos son notificados.
+- **Heartbeat entre hubs**: cada conexión hub-hub incluye ping/pong periódico para detectar fallos rápidamente (timeout configurable).
+- **Verificación de disponibilidad**: antes de reenviar una señal, el hub local consulta su registro remoto; si el agente destino no existe o está offline, la señal no se envía.
+- **API JSON‑RPC extendida**: nuevos métodos para consultar agentes remotos.
 
-Cada hub puede definir sus vecinos en un archivo JSON. Ejemplo `remotes.json`:
+### Configuración (idéntica a Fase 1)
+
+Cada hub define sus vecinos en un archivo JSON. Ejemplo `remotes.json`:
 
 ```json
 {
@@ -239,23 +245,27 @@ Cada hub puede definir sus vecinos en un archivo JSON. Ejemplo `remotes.json`:
 }
 ```
 
-Luego inicia el hub con el parámetro `--remote-hubs`:
+Inicia el hub con:
 
 ```bash
 neural-hub --port 8765 --domain empresa-a.com --remote-hubs remotes.json
 ```
 
-El parámetro `--domain` establece la identidad del hub (debe coincidir con la clave que otros hubs usan en sus configuraciones).
+Una vez conectados, los hubs comenzarán a intercambiar automáticamente sus listas de agentes.
 
-### Uso desde los agentes
+### Uso desde agentes
 
-Los agentes pueden enviar mensajes a destinos remotos usando la notación `nombre@dominio`. Ejemplo:
+Los agentes pueden consultar disponibilidad remota antes de enviar:
 
 ```python
-await agente.transmit("vendedor@empresa-b.com", NeuralSignalType.NOREPINEPHRINE, {...})
+# Consultar disponibilidad
+info = await agent.jsonrpc_call("remote_agent.discover", {"name": "vendedor@empresa-b.com"})
+if info["online"]:
+    # Enviar señal solo si está disponible
+    await agent.transmit("vendedor@empresa-b.com", NeuralSignalType.NOREPINEPHRINE, {...})
 ```
 
-El hub local se encarga de todo el enrutamiento.
+El hub también rechazará automáticamente envíos a agentes remotos no disponibles (sin necesidad de consulta previa).
 
 ---
 
@@ -269,7 +279,7 @@ The dashboard serves a simple REST API at `/api/status`. You can query it direct
 curl http://127.0.0.1:8080/api/status
 ```
 
-It returns a JSON with current hub state (agents, synapses, stats). This is what the frontend uses to update the display.
+It returns a JSON with current hub state (agents, synapses, stats, and now also remote agents count). This is what the frontend uses to update the display.
 
 ### Using SSL/WSS in Production
 
@@ -343,20 +353,20 @@ No tracebacks, no hanging processes.
 │   Agent C       │◄──────────────────►│    (optional)   │
 │  (ventas #2)    │                     └────────┬────────┘
 └─────────────────┘                              │
-                                                  │  Federation
+                                                  │  Federation (Fase 2)
                                            ┌──────▼──────┐
                                            │  Remote Hub │
                                            │ (empresa-b) │
                                            └─────────────┘
+                                                 │
+                                      (intercambio de listas
+                                       y heartbeats periódicos)
 ```
 
 - All communication is bidirectional WebSocket (binary frames for signals, JSON for control and JSON‑RPC).
-- The hub never initiates messages – it only reacts to incoming data.
-- Synapses are stored as `"source_hash:target_hash"` keys with floating‑point strength.
-- The pending queue is per‑target‑hash and survives hub restarts (thanks to SQLite).
-- The optional dashboard runs on a separate HTTP port, serving a single‑page application and a REST API.
-- Federation adds persistent connections between hubs, with automatic reconnection and token authentication.
-- JSON‑RPC methods are versioned (e.g., `v1.agent.list`) for future compatibility.
+- Hubs now exchange `HUB_PEER_UPDATE` messages to keep remote agent registries in sync.
+- Heartbeat (ping/pong) ensures quick detection of failed connections.
+- JSON‑RPC methods allow querying remote agent presence.
 
 ---
 
@@ -366,8 +376,9 @@ No tracebacks, no hanging processes.
 - **Message persistence** – signals for offline agents are stored in SQLite and delivered on reconnection.
 - **TTL expiration** – old pending messages are automatically purged.
 - **Heartbeat monitoring** – hubs log regular status updates; dashboard shows live metrics.
+- **Federation heartbeat** – active ping/pong between hubs detects failures within seconds.
 - **JSON‑RPC resilience** – malformed requests are rejected with proper error codes; internal exceptions are caught and reported.
-- **Throughput**: A single hub handles thousands of signals per second. Federation adds minimal overhead (JSON wrapping of forwarded signals).
+- **Throughput**: A single hub handles thousands of signals per second. Federation adds minimal overhead (JSON wrapping of forwarded signals and periodic peer updates).
 - **Latency**: <1ms local, 1‑50ms over network, plus network RTT for federated hops.
 
 ---
@@ -396,8 +407,8 @@ Tests cover:
 - Signal routing (unicast, broadcast, round‑robin).
 - Offline queuing and delivery.
 - Synapse persistence.
-- **Federation basics** (hub registration, forwarding).
-- **JSON‑RPC API** (all methods, error handling, versioning).
+- **Federation Fase 2** (hub registration, peer updates, heartbeat, remote agent discovery).
+- **JSON‑RPC API** (all methods, error handling, versioning, remote queries).
 
 ---
 
@@ -414,7 +425,13 @@ agent = MyAgent(agent_id="comprador", domain="empresa-a.com", hub_host="localhos
 
 The agent will automatically include its domain during registration, allowing the hub to route replies correctly.
 
-To use the JSON‑RPC API from an agent, call `agent.jsonrpc_call()` or `agent.jsonrpc_notify()` as shown in the examples.
+To query remote agent presence (new in Fase 2), use the JSON‑RPC methods:
+
+```python
+info = await agent.jsonrpc_call("remote_agent.discover", {"name": "vendedor@empresa-b.com"})
+if info["online"]:
+    await agent.transmit("vendedor@empresa-b.com", NeuralSignalType.NOREPINEPHRINE, {...})
+```
 
 ---
 
@@ -427,13 +444,13 @@ To use the JSON‑RPC API from an agent, call `agent.jsonrpc_call()` or `agent.j
 - Reenvío de señales con TTL.
 - **JSON‑RPC 2.0 API básica** (`hub.status`, `agent.list`, `agent.transmit`).
 
-### 🔄 Fase 2: Descubrimiento dinámico y presencia (próximo)
+### ✅ Fase 2: Descubrimiento dinámico y presencia (completada)
 - Intercambio de listas de agentes entre hubs (`HUB_PEER_UPDATE`).
 - Enrutamiento optimizado (el hub sabe de antemano si un destino remoto existe).
 - Heartbeats entre hubs y detección de fallos mejorada.
-- **Ampliación de la API JSON‑RPC** para soportar consultas de presencia remota.
+- **Ampliación de la API JSON‑RPC** para soportar consultas de presencia remota (`remote_agent.discover`, `hub.remote_agents`).
 
-### ⏳ Fase 3: Alta disponibilidad y balanceo
+### ⏳ Fase 3: Alta disponibilidad y balanceo (próximo)
 - Múltiples hubs por dominio (clúster).
 - Resolución de conflictos de nombres.
 - Sincronización de estado entre réplicas.

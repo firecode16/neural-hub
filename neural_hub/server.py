@@ -2,7 +2,7 @@
 NeuralHub — Servidor Central del Protocolo Neural
 ===================================================
 Versión con persistencia SQLite, round-robin automático, dashboard opcional,
-soporte para federación entre hubs (Fase 1), dominio propio configurable
+soporte para federación entre hubs (Fase 1 y Fase 2), dominio propio configurable
 y API JSON-RPC 2.0 con versionado de métodos.
 """
 
@@ -37,10 +37,10 @@ from neural_protocol.utils.constants import (
     CTRL_HUB_PEER_UPDATE,
 )
 
+# Constantes para heartbeat entre hubs
+HEARTBEAT_INTERVAL = 15   # segundos entre pings
+HEARTBEAT_TIMEOUT = 5     # segundos sin pong para considerar caída
 
-# ─────────────────────────────────────────────
-# JSON-RPC 2.0 detection helper
-# ─────────────────────────────────────────────
 
 def is_jsonrpc(data: bytes) -> bool:
     """
@@ -100,7 +100,7 @@ class PendingSignal:
 class RemoteHubConnection:
     """
     Gestiona una conexión saliente a un hub remoto (federación).
-    Se encarga de la reconexión automática y el envío de mensajes.
+    Se encarga de la reconexión automática, heartbeat y envío de mensajes.
     """
 
     def __init__(self, hub: NeuralHub, domain: str, url: str, token: Optional[str], enabled: bool):
@@ -112,7 +112,9 @@ class RemoteHubConnection:
         self._conn: Optional[WebSocketConnection] = None
         self._connected = asyncio.Event()
         self._reconnect_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
         self._reconnect_attempts = 0
+        self._last_pong: float = 0
         self.logger = logging.getLogger(f"RemoteHub-{domain}")
 
     async def connect(self):
@@ -125,9 +127,14 @@ class RemoteHubConnection:
             try:
                 await self._connect_and_register()
                 self._reconnect_attempts = 0
+                # Iniciar heartbeat después de conexión exitosa
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
                 await self._receive_loop()
             except Exception as e:
                 self.logger.error(f"⚠️  Conexión perdida con {self.domain}: {e}")
+                if self._heartbeat_task:
+                    self._heartbeat_task.cancel()
+                    self._heartbeat_task = None
 
             if not self.hub._running:
                 break
@@ -164,8 +171,31 @@ class RemoteHubConnection:
         if resp.get("_ctrl") != "hub_registered":
             raise ConnectionError(f"Registro rechazado por {self.domain}: {resp}")
 
+        self._last_pong = time.time()
         self.logger.info(f"✅ Registrado en hub remoto {self.domain}")
         self._connected.set()
+
+        # Solicitar al hub local que envíe su lista de agentes a este remoto
+        asyncio.create_task(self.hub._send_peer_update_to(self.domain, full=True))
+
+    async def _heartbeat_loop(self):
+        """Envía ping periódicamente y verifica recepción de pong."""
+        while self._conn and not self._conn.closed and self.hub._running:
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            if not self._connected.is_set():
+                continue
+            try:
+                await self.send_ctrl({"_ctrl": "ping"})
+                # Esperar un tiempo razonable para el pong
+                await asyncio.sleep(HEARTBEAT_TIMEOUT)
+                if time.time() - self._last_pong > HEARTBEAT_INTERVAL + HEARTBEAT_TIMEOUT:
+                    raise Exception("Heartbeat timeout")
+            except Exception as e:
+                self.logger.error(f"Heartbeat falló con {self.domain}: {e}")
+                # Forzar cierre para reconectar
+                if self._conn:
+                    await self._conn.close()
+                break
 
     async def _receive_loop(self):
         """Escucha mensajes del hub remoto."""
@@ -178,14 +208,16 @@ class RemoteHubConnection:
                 ctrl = parse_ctrl(data)
                 ctrl_type = ctrl.get("_ctrl")
                 if ctrl_type == CTRL_FWD_SIGNAL:
-                    # Procesar mensaje reenviado (entrante desde remoto)
                     await self.hub._handle_fwd_signal(ctrl)
                 elif ctrl_type == "pong":
-                    pass  # heartbeat
+                    self._last_pong = time.time()
+                elif ctrl_type == CTRL_HUB_PEER_UPDATE:
+                    await self.hub._handle_hub_peer_update(ctrl)
+                elif ctrl_type == "ping":
+                    await self.send_ctrl({"_ctrl": "pong", "ts": time.time()})
                 else:
                     self.logger.debug(f"Control ignorado: {ctrl_type}")
             else:
-                # No deberían llegar señales directas de agentes por este canal
                 self.logger.warning("Recibido dato binario inesperado de hub remoto")
 
     async def send_ctrl(self, ctrl: dict) -> bool:
@@ -208,6 +240,8 @@ class RemoteHubConnection:
     async def close(self):
         """Cierra la conexión."""
         self.enabled = False
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
         if self._conn:
             await self._conn.close()
         if self._reconnect_task:
@@ -217,7 +251,7 @@ class RemoteHubConnection:
 class NeuralHub:
     """
     Servidor central WebSocket del NeuralProtocol con persistencia SQLite y round-robin.
-    Ahora con soporte para federación (conexión a otros hubs), dominio propio configurable
+    Ahora con soporte para federación (Fase 2: descubrimiento dinámico), dominio propio configurable
     y API JSON-RPC 2.0 con versionado de métodos (prefijos v1, v2, etc.).
     """
 
@@ -244,6 +278,10 @@ class NeuralHub:
         # Conexiones a otros hubs (federación)
         self._outgoing_remote_connections: Dict[str, RemoteHubConnection] = {}  # dominio → conexión saliente
         self._incoming_remote_connections: Dict[str, WebSocketConnection] = {}  # dominio → conexión entrante
+
+        # Registro de agentes remotos conocidos (descubrimiento dinámico)
+        # clave: (dominio, nombre_agente) -> información
+        self._remote_agents: Dict[Tuple[str, str], dict] = {}
 
         # Synaptic DB en memoria (cargada desde SQLite)
         self._synapses: Dict[str, Synapse] = {}           # "src:tgt" → Synapse
@@ -411,7 +449,8 @@ class NeuralHub:
                 asyncio.create_task(self._connect_to_remote_hub(domain, config))
 
         asyncio.create_task(self._requeue_loop())
-        asyncio.create_task(self._heartbeat_loop())
+        asyncio.create_task(self._heartbeat_loop())  # stats locales
+        asyncio.create_task(self._peer_update_loop())  # actualizaciones periódicas a remotos
 
     async def _start_dashboard(self, port: int) -> None:
         """Inicia el servidor HTTP del dashboard usando aiohttp."""
@@ -554,6 +593,9 @@ class NeuralHub:
         # Entregar señales pendientes
         await self._flush_pending(neural_hash)
 
+        # Notificar a hubs remotos sobre el nuevo agente (actualización de peers)
+        asyncio.create_task(self._broadcast_peer_update(full=True))
+
         # Loop de recepción de señales
         try:
             await self._receive_loop(entry)
@@ -577,6 +619,8 @@ class NeuralHub:
                 ctrl_msg("peer_left", agent_id=entry.agent_id),
                 exclude=entry.neural_hash,
             )
+            # Notificar a hubs remotos sobre la desconexión
+            asyncio.create_task(self._broadcast_peer_update(full=True))
 
     async def _handle_hub_register(self, conn: WebSocketConnection, ctrl: dict) -> None:
         """Registra una conexión entrante de otro hub."""
@@ -595,6 +639,9 @@ class NeuralHub:
         # Responder confirmación
         await conn.send(ctrl_msg("hub_registered", domain=domain))
 
+        # Enviar nuestra lista actual de agentes al nuevo hub
+        await self._send_peer_update_to(domain, full=True)
+
         # Lanzar tarea para recibir mensajes de este hub
         asyncio.create_task(self._hub_receive_loop(conn, domain))
 
@@ -610,8 +657,12 @@ class NeuralHub:
                     ctrl_type = ctrl.get("_ctrl")
                     if ctrl_type == CTRL_FWD_SIGNAL:
                         await self._handle_fwd_signal(ctrl)
+                    elif ctrl_type == CTRL_HUB_PEER_UPDATE:
+                        await self._handle_hub_peer_update(ctrl)
+                    elif ctrl_type == "ping":
+                        await conn.send(ctrl_msg("pong", ts=time.time()))
                     elif ctrl_type == "pong":
-                        pass
+                        pass  # ya se maneja en el heartbeat del lado remoto
                     else:
                         self._info(f"Control ignorado de hub {domain}: {ctrl_type}")
                 else:
@@ -621,6 +672,10 @@ class NeuralHub:
         finally:
             self._incoming_remote_connections.pop(domain, None)
             self._info(f"🔌 Hub remoto desconectado (entrante): {domain}")
+            # Eliminar agentes de ese dominio de _remote_agents
+            keys_to_delete = [k for k in self._remote_agents if k[0] == domain]
+            for k in keys_to_delete:
+                del self._remote_agents[k]
 
     async def _receive_loop(self, entry: AgentEntry) -> None:
         """Loop principal: recibe señales de un agente y las rutea."""
@@ -668,7 +723,6 @@ class NeuralHub:
         try:
             request = json.loads(data)
         except json.JSONDecodeError as exc:
-            # Parse error — can't recover id, send id=null per spec
             error_resp = {
                 "jsonrpc": "2.0",
                 "id": None,
@@ -677,11 +731,10 @@ class NeuralHub:
             await entry.conn.send(json.dumps(error_resp).encode())
             return
 
-        req_id = request.get("id")          # None for Notifications
+        req_id = request.get("id")
         method  = request.get("method", "")
         params  = request.get("params") or {}
 
-        # Validate jsonrpc version
         if request.get("jsonrpc") != "2.0":
             if req_id is not None:
                 resp = {
@@ -694,7 +747,6 @@ class NeuralHub:
 
         try:
             result = await self._dispatch_jsonrpc(method, params, entry)
-            # Only send a response when the caller provided an id
             if req_id is not None:
                 resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
                 await entry.conn.send(json.dumps(resp).encode())
@@ -743,7 +795,6 @@ class NeuralHub:
         version = "v1"
         base_method = method
 
-        # Extract version prefix if present (e.g., "v1.agent.list" → "agent.list", version="v1")
         if '.' in method and method[0] == 'v' and method[1].isdigit():
             version_part, base_method = method.split('.', 1)
             version = version_part
@@ -761,26 +812,22 @@ class NeuralHub:
 
         # ── agent.list ────────────────────────────────────────────────────
         if base_method == "agent.list":
-            return {
-                "agents": [
-                    a.info() for a in self._agents.values()
-                ]
-            }
+            return {"agents": [a.info() for a in self._agents.values()]}
 
         # ── agent.discover ────────────────────────────────────────────────
         if base_method == "agent.discover":
-            name = params["name"]          # raises KeyError → -32602 if missing
+            name = params["name"]
             neural_hash = self._names.get(name)
             return {
-                "agent_id":    name,
+                "agent_id": name,
                 "neural_hash": neural_hash,
-                "online":      neural_hash in self._agents if neural_hash else False,
+                "online": neural_hash in self._agents if neural_hash else False,
             }
 
         # ── agent.transmit ────────────────────────────────────────────────
         if base_method == "agent.transmit":
-            target      = params["target"]       # required
-            sig_type_str = params["signal_type"] # required — name of NeuralSignalType
+            target      = params["target"]
+            sig_type_str = params["signal_type"]
             payload     = params.get("payload", {})
             try:
                 sig_type = NeuralSignalType[sig_type_str]
@@ -802,6 +849,41 @@ class NeuralHub:
             await self._route_signal(signal, raw, entry)
             return {"delivered": True, "msg_id": signal.msg_id}
 
+        # ── NUEVOS MÉTODOS PARA DESCUBRIMIENTO REMOTO ─────────────────────
+
+        if base_method == "remote_agent.discover":
+            # params: {"name": "vendedor@empresa-b.com"}
+            name = params["name"]
+            if GLOBAL_ID_SEPARATOR not in name:
+                raise KeyError("name must include domain (e.g., name@domain)")
+            local_name, domain = name.split(GLOBAL_ID_SEPARATOR, 1)
+            key = (domain, local_name)
+            info = self._remote_agents.get(key)
+            if info:
+                return {
+                    "exists": True,
+                    "online": info.get("online", False),
+                    "last_seen": info.get("last_seen", 0)
+                }
+            else:
+                return {"exists": False, "online": False, "last_seen": 0}
+
+        if base_method == "hub.remote_agents":
+            # params opcional: {"domain": "empresa-b.com"}
+            domain_filter = params.get("domain")
+            agents = []
+            for (dom, name), info in self._remote_agents.items():
+                if domain_filter and dom != domain_filter:
+                    continue
+                agents.append({
+                    "name": name,
+                    "domain": dom,
+                    "hash": info.get("hash"),
+                    "online": info.get("online", False),
+                    "last_seen": info.get("last_seen", 0)
+                })
+            return {"agents": agents}
+
         # ── unknown method ────────────────────────────────────────────────
         raise NotImplementedError(method)
 
@@ -821,7 +903,6 @@ class NeuralHub:
             ))
 
         elif t == "synapse_update":
-            # Agente reporta resultado de transmisión → actualizar plasticidad
             key = f"{ctrl['src']}:{ctrl['tgt']}"
             if key not in self._synapses:
                 self._synapses[key] = Synapse(ctrl["src"], ctrl["tgt"])
@@ -830,7 +911,6 @@ class NeuralHub:
                 syn.reinforce()
             else:
                 syn.weaken()
-            # Persistir
             self._save_synapse(key, syn)
 
         elif t == "status":
@@ -845,7 +925,7 @@ class NeuralHub:
         elif t == "ping":
             await entry.conn.send(ctrl_msg("pong", ts=time.time()))
 
-    # ── Routing con soporte para federación ───────────────────────────────
+    # ── Routing con soporte para federación y descubrimiento ─────────────
 
     async def _route_signal(
         self,
@@ -855,7 +935,7 @@ class NeuralHub:
     ) -> None:
         """
         Enruta una señal.
-        - Si target contiene '@', se reenvía a otro hub.
+        - Si target contiene '@', se reenvía a otro hub (previa verificación de disponibilidad).
         - Si target está vacío: broadcast.
         - Si target es un hash conocido: unicast directo.
         - Si target es un nombre (no hash): resuelve con round-robin.
@@ -866,6 +946,13 @@ class NeuralHub:
         if GLOBAL_ID_SEPARATOR in target_str:
             local_name, domain = target_str.split(GLOBAL_ID_SEPARATOR, 1)
             if domain in self.remote_hubs:
+                # Verificar disponibilidad del agente remoto
+                key = (domain, local_name)
+                remote_info = self._remote_agents.get(key)
+                if not remote_info or not remote_info.get("online", False):
+                    self._info(f"⚠️  Agente remoto {target_str} no disponible (no reportado u offline)")
+                    # Opcional: notificar al emisor con una señal de error (ej. GABA)
+                    return
                 # Reenviar a hub remoto
                 success = await self._forward_to_remote(domain, signal, raw, sender, local_name)
                 if not success:
@@ -895,7 +982,6 @@ class NeuralHub:
 
         # 3. ¿Es un hash conocido?
         if target_str in self._agents:
-            # Unicast directo a ese hash
             target = self._agents[target_str]
             try:
                 await target.conn.send(raw)
@@ -916,7 +1002,6 @@ class NeuralHub:
             self._info(f"⚠️  Nombre desconocido o sin agentes: '{target_str}'")
             return
 
-        # Round-robin: seleccionar el siguiente hash
         idx = self._rr_index.get(target_str, 0)
         target_hash = hashes[idx % len(hashes)]
         self._rr_index[target_str] = (idx + 1) % len(hashes)
@@ -1005,6 +1090,71 @@ class NeuralHub:
         else:
             self._enqueue(target_hash, raw)
 
+    # ── Gestión de peers remotos (HUB_PEER_UPDATE) ────────────────────────
+
+    async def _send_peer_update_to(self, domain: str, full: bool = True) -> None:
+        """Envía la lista de agentes locales a un hub remoto específico."""
+        conn = self._outgoing_remote_connections.get(domain)
+        if not conn:
+            return
+        agents_list = [
+            {
+                "name": entry.agent_id,
+                "hash": h,
+                "online": True,
+                "domain": entry.domain or self.domain,  # El dominio del agente (puede ser None)
+            }
+            for h, entry in self._agents.items()
+        ]
+        update_msg = {
+            "_ctrl": CTRL_HUB_PEER_UPDATE,
+            "domain": self.domain,
+            "agents": agents_list,
+            "full_update": full,
+            "timestamp": time.time()
+        }
+        await conn.send_ctrl(update_msg)
+
+    async def _broadcast_peer_update(self, full: bool = True) -> None:
+        """Envía la lista de agentes locales a todos los hubs remotos conectados."""
+        for domain in list(self._outgoing_remote_connections.keys()):
+            await self._send_peer_update_to(domain, full)
+
+    async def _handle_hub_peer_update(self, ctrl: dict) -> None:
+        """Actualiza el registro de agentes remotos con la información recibida."""
+        domain = ctrl["domain"]
+        agents = ctrl.get("agents", [])
+        timestamp = ctrl.get("timestamp", time.time())
+
+        self._info(f"📥 Recibida actualización de peers desde {domain} ({len(agents)} agentes)")
+
+        # Actualizar o agregar agentes
+        for a in agents:
+            key = (domain, a["name"])
+            self._remote_agents[key] = {
+                "name": a["name"],
+                "hash": a.get("hash"),
+                "online": a.get("online", True),
+                "last_seen": timestamp,
+                "domain": domain,
+            }
+
+        # Opcional: limpiar agentes que ya no están en la lista (si full_update=True)
+        if ctrl.get("full_update", False):
+            # Eliminar agentes de este dominio que no estén en la nueva lista
+            current_keys = {(domain, a["name"]) for a in agents}
+            keys_to_delete = [k for k in self._remote_agents if k[0] == domain and k not in current_keys]
+            for k in keys_to_delete:
+                del self._remote_agents[k]
+
+    async def _peer_update_loop(self) -> None:
+        """Tarea en background que envía actualizaciones periódicas a todos los hubs remotos."""
+        while self._running:
+            await asyncio.sleep(30)  # cada 30 segundos
+            await self._broadcast_peer_update(full=True)
+
+    # ── Cola de mensajes ─────────────────────────────────────────────────
+
     def _enqueue(self, target_hash: str, raw: bytes) -> None:
         if target_hash not in self._pending:
             self._pending[target_hash] = []
@@ -1034,7 +1184,6 @@ class NeuralHub:
                 delivered += 1
                 self._delete_pending(neural_hash, ps)
             except Exception:
-                # Si falla, lo volvemos a encolar
                 self._enqueue(neural_hash, ps.encoded)
 
         if delivered:
@@ -1071,7 +1220,7 @@ class NeuralHub:
             conn.close()
 
     async def _heartbeat_loop(self) -> None:
-        """Imprime stats cada 30s."""
+        """Imprime stats cada 30s (solo para monitoreo local)."""
         while self._running:
             await asyncio.sleep(30)
             uptime = time.time() - self._stats["started_at"]
@@ -1081,6 +1230,7 @@ class NeuralHub:
                 f"señales={self._stats['total_signals']} "
                 f"bytes={self._stats['total_bytes']:,} "
                 f"pendientes={pending_total} "
+                f"remotos={len(self._remote_agents)} "
                 f"uptime={uptime:.0f}s"
             )
 
@@ -1093,6 +1243,7 @@ class NeuralHub:
             "pending_queues": sum(len(v) for v in self._pending.values()),
             "stats": self._stats,
             "agents": {a.neural_hash: a.info() for a in self._agents.values()},
+            "remote_agents": len(self._remote_agents),
             "synapses": {
                 k: {"strength": round(s.strength, 3), "success_rate": round(s.success_rate, 3)}
                 for k, s in self._synapses.items()

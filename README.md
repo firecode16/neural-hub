@@ -104,27 +104,23 @@ Now visit [http://127.0.0.1:8080](http://127.0.0.1:8080) to see real‑time metr
 
 ### 3. Connect agents
 
-Agents must use the `WSNeuralAgent` classes from `neural-protocol`. Example:
+Agents must use the `WSNeuralAgent` class from `neural-protocol`. Here's a simple example:
 
 ```python
-from neural_protocol.agents.support_ws import WSSupportAgent
-from neural_protocol.agents.sales_ws import WSSalesAgent
+from neural_protocol.agent.base_ws import WSNeuralAgent
 from neural_protocol.core.signal import NeuralSignalType
 import asyncio
 
+class MyAgent(WSNeuralAgent):
+    async def handle_signal(self, signal):
+        print(f"Received: {signal}")
+
 async def main():
-    support = WSSupportAgent()
-    sales = WSSalesAgent()
-    
-    await support.start()
-    await sales.start()
-    
-    # Send a signal to "sales" – the hub will round‑robin if multiple sales agents exist
-    await support.transmit("ventas", NeuralSignalType.NOREPINEPHRINE, {"task": "new_lead"})
-    
+    agent = MyAgent("worker", hub_host="127.0.0.1", hub_port=8765)
+    await agent.start()
+    await agent.transmit("another_agent", NeuralSignalType.NOREPINEPHRINE, {"task": "process"})
     await asyncio.sleep(5)
-    await support.stop()
-    await sales.stop()
+    await agent.stop()
 
 asyncio.run(main())
 ```
@@ -269,6 +265,12 @@ El hub también rechazará automáticamente envíos a agentes remotos no disponi
 
 ---
 
+## 📚 Example Projects
+
+For a complete, real-world example of federated agents in a B2B scenario (purchase-sales-invoicing), check out the **[federacion-demo](https://github.com/firecode16/federacion-demo)** repository. It demonstrates two companies with agents `comprador`, `vendedor`, and `facturacion` communicating across hubs.
+
+---
+
 ## Advanced Usage
 
 ### Dashboard API Endpoint
@@ -279,7 +281,7 @@ The dashboard serves a simple REST API at `/api/status`. You can query it direct
 curl http://127.0.0.1:8080/api/status
 ```
 
-It returns a JSON with current hub state (agents, synapses, stats, and now also remote agents count). This is what the frontend uses to update the display.
+It returns a JSON with current hub state (agents, synapses, stats, and remote agents count).
 
 ### Using SSL/WSS in Production
 
@@ -298,10 +300,10 @@ neural-hub --ssl --cert cert.pem --key key.pem --port 8765
 3. **Connect agents with SSL**:
 
 ```python
-agent = WSSupportAgent(use_ssl=True)  # or pass an SSL context
+agent = MyAgent("worker", hub_host="127.0.0.1", hub_port=8765, use_ssl=True)
 ```
 
-The hub will now use `wss://`. Agents accept self‑signed certificates by default (for development) – override by providing a custom `ssl_context`.
+The hub will now use `wss://`.
 
 ### Persistent Database
 
@@ -331,8 +333,6 @@ The hub handles `Ctrl+C` cleanly – you'll see:
 🛑 Interrupción recibida, cerrando hub...
 👋 Hub detenido correctamente.
 ```
-
-No tracebacks, no hanging processes.
 
 ---
 
@@ -364,7 +364,7 @@ No tracebacks, no hanging processes.
 ```
 
 - All communication is bidirectional WebSocket (binary frames for signals, JSON for control and JSON‑RPC).
-- Hubs now exchange `HUB_PEER_UPDATE` messages to keep remote agent registries in sync.
+- Hubs exchange `HUB_PEER_UPDATE` messages to keep remote agent registries in sync.
 - Heartbeat (ping/pong) ensures quick detection of failed connections.
 - JSON‑RPC methods allow querying remote agent presence.
 
@@ -378,7 +378,7 @@ No tracebacks, no hanging processes.
 - **Heartbeat monitoring** – hubs log regular status updates; dashboard shows live metrics.
 - **Federation heartbeat** – active ping/pong between hubs detects failures within seconds.
 - **JSON‑RPC resilience** – malformed requests are rejected with proper error codes; internal exceptions are caught and reported.
-- **Throughput**: A single hub handles thousands of signals per second. Federation adds minimal overhead (JSON wrapping of forwarded signals and periodic peer updates).
+- **Throughput**: A single hub handles thousands of signals per second. Federation adds minimal overhead.
 - **Latency**: <1ms local, 1‑50ms over network, plus network RTT for federated hops.
 
 ---
@@ -414,7 +414,7 @@ Tests cover:
 
 ## Integrating with Your Agents
 
-Your agents should inherit from `neural_protocol.agent.base_ws.WSNeuralAgent` (or use the pre‑built `WSSupportAgent`, `WSSalesAgent`, `WSBillingAgent`).  
+Your agents should inherit from `neural_protocol.agent.base_ws.WSNeuralAgent`.  
 The only requirement is to call `await agent.start()` and implement `handle_signal`.
 
 To use federation, simply pass the `domain` parameter when creating the agent:
@@ -432,6 +432,8 @@ info = await agent.jsonrpc_call("remote_agent.discover", {"name": "vendedor@empr
 if info["online"]:
     await agent.transmit("vendedor@empresa-b.com", NeuralSignalType.NOREPINEPHRINE, {...})
 ```
+
+For a complete example of custom agents in a federated scenario, see the **[federacion-demo](https://github.com/firecode16/federacion-demo)** project.
 
 ---
 

@@ -464,7 +464,7 @@ Contributions and ideas are welcome!
 
 ## License
 
-MIT © 2026 Firecode16
+MIT © 2026 Fredy Hernandez
 
 ---
 
